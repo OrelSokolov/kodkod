@@ -1,0 +1,74 @@
+require "spec"
+require "../src/fuzzy"
+require "../src/quick_open"
+require "../src/app"
+
+# Exposes the private settings/vim state for the flicker assertions.
+class SettingsTestApp < KodkodApp
+  def settings; @settings; end
+  def vim; @vim; end
+end
+
+SSCREEN = Egui::Rect.from_min_size(Egui::Pos2.zero,
+  Egui::Vec2.new(1200.0, 800.0))
+
+def settings_frame(app : SettingsTestApp, ctx : Egui::Context,
+                   events : Array(Egui::Event) = [] of Egui::Event,
+                   time : Float64 = 0.016) : Array(Egui::PaintCmd)
+  ctx.begin_frame(Egui::RawInput.new(SSCREEN, events, time))
+  app.update(ctx)
+  ctx.end_frame
+end
+
+describe "settings page" do
+  it "does not toggle settings on plain mouse-move frames" do
+    # Regression: `if ui.selectable_label(...)` — any object is truthy
+    # in Crystal, so the toggle blocks fired EVERY frame and the page
+    # flickered while the mouse moved (frames run per input event).
+    app = SettingsTestApp.new([] of String)
+    ctx = Egui::Context.new
+    5.times { |i| settings_frame(app, ctx, time: 0.016 * (i + 1)) }
+    ctx.router.navigate("root/settings")
+    settings_frame(app, ctx, time: 0.1)
+
+    before = {app.vim.enabled?, app.settings.show_hidden,
+              app.settings.show_explorer, app.settings.cursor_blinks}
+    8.times do |i|
+      # sweep the pointer across the selectable labels, one move/frame
+      settings_frame(app, ctx,
+        events: [Egui::Event.pointer_moved(
+          Egui::Pos2.new(300.0, 170.0 + (i % 4) * 30.0))],
+        time: 0.12 + 0.016 * (i + 1))
+    end
+    after = {app.vim.enabled?, app.settings.show_hidden,
+             app.settings.show_explorer, app.settings.cursor_blinks}
+    after.should eq(before)
+  end
+
+  it "toggles VIM mode on a real click at the label" do
+    app = SettingsTestApp.new([] of String)
+    ctx = Egui::Context.new
+    3.times { |i| settings_frame(app, ctx, time: 0.016 * (i + 1)) }
+    ctx.router.navigate("root/settings")
+    cmds = settings_frame(app, ctx, time: 0.1)
+
+    # Locate the label from the frame's own paint commands — the
+    # layout position is the page's business, not the spec's.
+    text = cmds.find do |c|
+      c.is_a?(Egui::TextCmd) && c.text.includes?("VIM mode")
+    end
+    text.should_not be_nil
+    pos = text.not_nil!.as(Egui::TextCmd).pos
+    was = app.vim.enabled?
+
+    click = [Egui::Event.pointer_moved(pos),
+             Egui::Event.pointer_pressed(pos),
+             Egui::Event.pointer_released(pos)]
+    settings_frame(app, ctx, events: click, time: 0.12)
+    app.vim.enabled?.should eq(!was)
+
+    # Back to the saved state (the click persisted the flip).
+    settings_frame(app, ctx, events: click, time: 0.14)
+    app.vim.enabled?.should eq(was)
+  end
+end

@@ -1,0 +1,18 @@
+name: kodkod
+version: 0.1.0
+description: |
+  kodkod — a code editor (VSCode/Zed-like) built on egui-cr: a rope
+  buffer for huge files, syntax highlighting via the highlight.cr
+  shard (a 1:1 port of the highlight.js engine), a lazy-loading file
+  tree widget, and basic VIM modal editing.
+
+authors:
+  - Oleg
+
+dependencies:
+  egui-cr:
+    path: ../egui.cr
+  highlight_cr:
+    path: ../myshards/highlight.cr
+
+license: MIT

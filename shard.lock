@@ -1,0 +1,18 @@
+version: 2.0
+shards:
+  egui-cr:
+    path: ../egui.cr
+    version: 0.1.0
+
+  freetype-cr:
+    git: https://github.com/orelsokolov/freetype.cr.git
+    version: 1.0.0
+
+  highlight_cr:
+    path: ../myshards/highlight.cr
+    version: 0.1.0
+
+  nanosvg:
+    git: https://github.com/orelsokolov/nanosvg.cr.git
+    version: 1.0.0+git.commit.74a8f9f1ecdb0cf382b439f27b4cd73ecf5f7bfa
+

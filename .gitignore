@@ -1,0 +1,5 @@
+/lib/
+/bin/
+/.crystal-cache/
+*.dwarf
+/tmp_*
