@@ -321,7 +321,8 @@ module Kodkod
 
       if selected
         painter.rect(rect, 4.0,
-          resp.active? ? visuals.button_active : visuals.selection_fill)
+          resp.active? ? visuals.button_active
+                       : visuals.fade_color(visuals.selection_fill, 0.6))
       elsif resp.hovered?
         painter.rect(rect, 4.0,
           visuals.fade_color(visuals.selection_fill, 0.4))

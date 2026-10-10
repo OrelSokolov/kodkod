@@ -15,6 +15,20 @@ def with_temp_dir(& : String ->)
   end
 end
 
+# Drive one frame of a FileTree over *dir* with raw key presses (the
+# keyboard-navigation specs); *on_activate* receives activated files.
+def key_frame(ctx : Egui::Context, dir : String, keys : Array(Egui::KeyCode),
+              &on_activate : String ->)
+  raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
+    Egui::Vec2.new(300.0, 600.0)))
+  raw.events = keys.map { |k| Egui::Event.key_pressed(k) }
+  ctx.begin_frame(raw)
+  ctx.central_panel do |ui|
+    ui.file_tree("x", dir) { |path| on_activate.call(path) }
+  end
+  ctx.end_frame
+end
+
 describe Kodkod::FileTree do
   it "lists directories first, then files, alphabetically (case-blind)" do
     with_temp_dir do |dir|
@@ -63,9 +77,7 @@ describe Kodkod::FileTree do
         Egui::Rect.from_min_size(Egui::Pos2.zero,
           Egui::Vec2.new(300.0, 600.0))))
       ctx.central_panel do |ui|
-        ui.scroll_area do |sui|
-          sui.file_tree("x", dir) { |_path| }
-        end
+        ui.file_tree("x", dir) { |_path| }
       end
       ctx.end_frame # children of the root were walked — no raise
     end
@@ -87,9 +99,7 @@ describe Kodkod::FileTree do
         Egui::Rect.from_min_size(Egui::Pos2.zero,
           Egui::Vec2.new(300.0, 600.0))))
       ctx.central_panel do |ui|
-        ui.scroll_area do |sui|
-          sui.file_tree("x", dir, active: sel) { |_path| }
-        end
+        ui.file_tree("x", dir, active: sel) { |_path| }
       end
       ctx.end_frame
 
@@ -120,9 +130,7 @@ describe Kodkod::FileTree do
           Egui::Rect.from_min_size(Egui::Pos2.zero,
             Egui::Vec2.new(300.0, 600.0))))
         ctx.central_panel do |ui|
-          ui.scroll_area do |sui|
-            sui.file_tree("x", dir, active: active) { |_path| }
-          end
+          ui.file_tree("x", dir, active: active) { |_path| }
         end
         ctx.end_frame
       end
@@ -150,6 +158,154 @@ describe Kodkod::FileTree do
       ctx.painter.commands.select(Egui::RectCmd)
         .select { |c| c.fill == v.selection_fill }.should_not be_empty
       ctx.memory.data.get_string(lt_id).should be_empty
+    end
+  end
+
+  # Keyboard navigation: rows are focusable, Up/Down walk them, Enter
+  # acts like a click. Row node ids come from the same scheme the
+  # widget uses (base.child(Id.from(path).value)); focus requests are
+  # applied on the FOLLOWING frame's begin_frame.
+  describe "keyboard" do
+    it "Enter toggles the focused directory row" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        Dir.mkdir(File.join(dir, "src"))
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
+        ctx.memory.data.set_bool(root_id, true)
+
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |_p| } # register rows
+        ctx.memory.focus.request(src_id)                  # cursor on src/
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |_p| } # focus takes hold
+        ctx.memory.data.get_bool(src_id, false).should be_false
+
+        key_frame(ctx, dir, [Egui::KeyCode::Enter]) { |_p| } # open
+        ctx.memory.data.get_bool(src_id, false).should be_true
+        key_frame(ctx, dir, [Egui::KeyCode::Enter]) { |_p| } # close
+        ctx.memory.data.get_bool(src_id, false).should be_false
+      end
+    end
+
+    it "Enter activates the focused file row" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        File.touch(File.join(dir, "main.cr"))
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        file_id = base.child(Egui::Id.from(File.join(dir, "main.cr")).value)
+        ctx.memory.data.set_bool(root_id, true)
+
+        opened = nil
+        cb = ->(p : String) { opened = p }
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| cb.call(p) }
+        ctx.memory.focus.request(file_id)
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| cb.call(p) }
+        opened.should be_nil
+
+        key_frame(ctx, dir, [Egui::KeyCode::Enter]) { |p| cb.call(p) }
+        opened.should eq(File.join(dir, "main.cr"))
+      end
+    end
+
+    it "Up/Down walk the rows" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        Dir.mkdir(File.join(dir, "src"))
+        File.touch(File.join(dir, "zebra.txt"))
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
+        zebra_id = base.child(Egui::Id.from(File.join(dir, "zebra.txt")).value)
+        ctx.memory.data.set_bool(root_id, true)
+
+        noop = ->(_p : String) {}
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.request(root_id)
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+
+        # Each arrow moves one row; focus.id updates on the FOLLOWING
+        # frame's begin_frame (navigate_focus requests, Focus applies).
+        key_frame(ctx, dir, [Egui::KeyCode::Down]) { |p| noop.call(p) }
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.id.should eq(src_id)
+
+        key_frame(ctx, dir, [Egui::KeyCode::Down]) { |p| noop.call(p) }
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.id.should eq(zebra_id)
+
+        key_frame(ctx, dir, [Egui::KeyCode::Up]) { |p| noop.call(p) }
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.id.should eq(src_id)
+      end
+    end
+
+    it "scrolls the focused row into view" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        40.times { |i| File.touch(File.join(dir, "f%02d.txt" % i)) }
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        ctx.memory.data.set_bool(root_id, true)
+        scroll_id = base.child(Egui::Id.from("scroll").value)
+
+        # A short window: only a few of the 41 rows fit the viewport.
+        raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
+          Egui::Vec2.new(300.0, 120.0)))
+        frame = ->(keys : Array(Egui::KeyCode)) do
+          raw.events = keys.map { |k| Egui::Event.key_pressed(k) }
+          ctx.begin_frame(raw)
+          ctx.central_panel do |ui|
+            ui.file_tree("x", dir) { |_p| }
+          end
+          ctx.end_frame
+        end
+
+        frame.call([] of Egui::KeyCode)
+        ctx.memory.focus.request(root_id)
+        frame.call([] of Egui::KeyCode)
+        ctx.memory.data.get_vec2(scroll_id).y.should eq(0.0)
+
+        8.times { frame.call([Egui::KeyCode::Down]) }
+        ctx.memory.data.get_vec2(scroll_id).y.should be > 0.0
+      end
+    end
+  end
+end
+
+describe "FileTree font zoom" do
+  it "Ctrl+Minus/Equal zoom the tree font on hover, whole points only" do
+    ctx = Egui::Context.new
+    with_temp_dir do |dir|
+      File.touch(File.join(dir, "a.txt"))
+      cell = Egui::Id.from("kodkod/file_tree/x")
+        .child(Kodkod::FileTree::FONT_SALT)
+      ctrl = Egui::Modifiers.new(ctrl: true)
+      inside = Egui::Pos2.new(150.0, 100.0)
+      zoom_frame = ->(key : Egui::KeyCode?, pos : Egui::Pos2) do
+        events = [Egui::Event.pointer_moved(pos)] of Egui::Event
+        events << Egui::Event.key_pressed(key, ctrl) if key
+        raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
+          Egui::Vec2.new(300.0, 600.0)))
+        raw.events = events
+        ctx.begin_frame(raw)
+        ctx.central_panel do |ui|
+          ui.file_tree("x", dir) { |_p| }
+        end
+        ctx.end_frame
+      end
+
+      zoom_frame.call(nil, inside) # register rows; no override yet
+      ctx.memory.data.get_f64(cell).should eq(0.0)
+      zoom_frame.call(Egui::KeyCode::Minus, inside) # 16.0 → 15.0
+      ctx.memory.data.get_f64(cell).should eq(15.0)
+      zoom_frame.call(Egui::KeyCode::Equal, inside)
+      ctx.memory.data.get_f64(cell).should eq(16.0)
+
+      # Off the tree the keys do nothing.
+      away = Egui::Pos2.new(-50.0, -50.0)
+      zoom_frame.call(Egui::KeyCode::Minus, away)
+      ctx.memory.data.get_f64(cell).should eq(16.0)
     end
   end
 end

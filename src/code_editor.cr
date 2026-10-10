@@ -38,10 +38,13 @@ module Kodkod
     VIEW_H_SALT  = 0x21EF_u64 # viewport height metric
     WMAX_SALT    = 0x3A3A_u64 # running max line width
     WMAXV_SALT   = 0x3A3B_u64 # buffer version the max was computed at
+    FONT_SALT    = 0xF017_u64 # Ctrl +/- font zoom override (shared)
     BAR_W        =        8.0
     HBAR_H       =        6.0
     GUTTER_PAD   =       10.0
     ID_PREFIX    = "kodkod/code_editor/"
+    FONT_MIN     = 8.0
+    FONT_MAX     = 40.0
 
     def initialize(@buffer : EditorBuffer, @focus_id : String? = nil,
                    @keyboard : Bool = true,
@@ -55,6 +58,23 @@ module Kodkod
     # Global (ui-scope-independent) widget id — see the file header.
     def self.widget_id(focus_id : String) : Egui::Id
       Egui::Id.from(ID_PREFIX + focus_id)
+    end
+
+    # The shared cell behind the Ctrl+Minus / Ctrl+Equal font zoom —
+    # keyed by the ID_PREFIX base (no focus_id), so every editor tab
+    # zooms together. 0.0 = no override (the theme's size).
+    def self.font_cell : Egui::Id
+      Egui::Id.from(ID_PREFIX).child(FONT_SALT)
+    end
+
+    # Zoom every editor's font by `delta` WHOLE points (base = the
+    # theme size on the first press), clamped to FONT_MIN..FONT_MAX.
+    def self.zoom(ctx : Egui::Context, delta : Int32) : Nil
+      cur = ctx.memory.data.get_f64(font_cell, 0.0)
+      base = cur > 0.0 ? cur : ctx.style.font_size
+      size = (base + delta).round.clamp(FONT_MIN, FONT_MAX)
+      ctx.memory.data.set_f64(font_cell, size)
+      ctx.request_repaint
     end
 
     # --- public caret/selection API ---------------------------------
@@ -211,6 +231,12 @@ module Kodkod
       font_size = style.font_size
       fonts = ui.ctx.fonts_for("monospace")
       memory = ui.ctx.memory
+      # The shared Ctrl +/- zoom override (0 = the theme's size).
+      font_id = CodeEditor.font_cell
+      memory.use_id(font_id)
+      if (zoom = memory.data.get_f64(font_id, 0.0)) > 0.0
+        font_size = zoom
+      end
       input = ui.ctx.input
       visuals = style.visuals
       rope = @buffer.rope
@@ -333,6 +359,13 @@ module Kodkod
       end
 
       # --- keyboard (insert mode / standard input) --------------------
+      # The Ctrl +/- font zoom runs in EVERY mode — VIM normal mode
+      # turns the widget keyboard off (@keyboard false), but the editor
+      # still holds focus, so the zoom lives here, not handle_keyboard.
+      if response.has_focus? && input.modifiers.ctrl
+        CodeEditor.zoom(ui.ctx, -1) if input.consume_key(Egui::KeyCode::Minus)
+        CodeEditor.zoom(ui.ctx, 1) if input.consume_key(Egui::KeyCode::Equal)
+      end
       if @keyboard && response.has_focus?
         ui.ctx.memory.focus.lock_arrows(horizontal: true, vertical: true)
         cursor, anchor, edited = handle_keyboard(ui.ctx, cursor, anchor,

@@ -204,3 +204,50 @@ describe Kodkod::CodeEditor do
       .count { |t| t.text == "h" && t.color == bg }.should eq(0)
   end
 end
+
+describe "CodeEditor font zoom" do
+  it "Ctrl+Minus/Equal zoom the (shared) code font in whole points" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("abc")
+    cell = Kodkod::CodeEditor.font_cell
+    Kodkod::CodeEditor.request_focus(ctx, "t1")
+    editor_frame(ctx, b) # render → focus request queued
+    editor_frame(ctx, b) # focus lands; theme size is 16.0
+    ctrl = Egui::Modifiers.new(ctrl: true)
+    editor_frame(ctx, b,
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Minus, ctrl)])
+    ctx.memory.data.get_f64(cell).should eq(15.0)
+    editor_frame(ctx, b,
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Minus, ctrl)])
+    ctx.memory.data.get_f64(cell).should eq(14.0)
+    editor_frame(ctx, b,
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Equal, ctrl)])
+    ctx.memory.data.get_f64(cell).should eq(15.0)
+  end
+
+  it "ignores the zoom keys without focus" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("abc")
+    cell = Kodkod::CodeEditor.font_cell
+    editor_frame(ctx, b) # never focused
+    ctrl = Egui::Modifiers.new(ctrl: true)
+    editor_frame(ctx, b,
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Minus, ctrl)])
+    ctx.memory.data.get_f64(cell).should eq(0.0)
+  end
+end
+
+describe "CodeEditor font zoom (VIM normal: widget keyboard off)" do
+  it "zooms with keyboard: false while focused" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("abc")
+    cell = Kodkod::CodeEditor.font_cell
+    Kodkod::CodeEditor.request_focus(ctx, "t1")
+    editor_frame(ctx, b, keyboard: false)
+    editor_frame(ctx, b, keyboard: false) # focus lands
+    ctrl = Egui::Modifiers.new(ctrl: true)
+    editor_frame(ctx, b, keyboard: false,
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Minus, ctrl)])
+    ctx.memory.data.get_f64(cell).should eq(15.0)
+  end
+end

@@ -42,6 +42,42 @@ argv.each_with_index do |arg, i|
     files << arg
   end
 end
+# Monospace face for code: the editor, the ':' command line and inline
+# code all paint through the "monospace" family (Context#mono_fonts).
+# Hack — the FIRST face of upstream egui's Monospace family — shipped
+# in the egui.cr checkout, then the system mono fallbacks (the same
+# chain as h2term); without one the app font serves code — degraded
+# (proportional advances) but functional.
+EGUI_FONTS = File.expand_path(
+  "../../egui.cr/egui-upstream/crates/epaint_default_fonts/fonts", __DIR__)
+
+SYSTEM_MONO = [
+  "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+  "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+  "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+  "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+  "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf",
+  "/System/Library/Fonts/SFMono-Regular.ttf",
+  "/System/Library/Fonts/SFNSMono.ttf",
+  "/Library/Fonts/JetBrainsMono-Regular.ttf",
+]
+
+def pick_monospace : Nil
+  candidates = [
+    "#{EGUI_FONTS}/Hack-Regular.ttf", # upstream's terminal face
+  ] + SYSTEM_MONO
+
+  font = Egui::Backend::Sokol.fonts_from_system(candidates)
+  if font
+    if (faces = font.as?(Egui::Backend::CrystalFonts))
+      STDERR.puts "kodkod: mono font faces: #{faces.face_paths.join(" -> ")}"
+    end
+    Egui::Backend::Sokol.register_font("monospace", font)
+  end
+end
+
+pick_monospace
+
 app = KodkodApp.new(files, dir, theme)
 if (route = cli[:route])
   app.ctx.router.navigate(route)

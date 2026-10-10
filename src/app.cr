@@ -222,6 +222,24 @@ class KodkodApp < Egui::App
     ACTION_TOGGLE_EXPLORER => "Ctrl+Shift+E",
   }
 
+  # The chrome panels (explorer sidebar, status bar) run a notch
+  # smaller than the 16 px app default — code stays at full size.
+  # Whole values only (the Ctrl +/- zoom steps whole points too).
+  PANEL_FONT_SIZE = 13.0
+
+  # Shrink ctx.style.font_size for a panel's subtree. Panels render
+  # synchronously inside their block, so save/restore scopes the size
+  # to exactly that content (ensure keeps the theme intact on a raise).
+  private def with_panel_font(ctx : Egui::Context, &)
+    old = ctx.style.font_size
+    ctx.style.font_size = PANEL_FONT_SIZE
+    begin
+      yield
+    ensure
+      ctx.style.font_size = old
+    end
+  end
+
   def update(ctx : Egui::Context) : Nil
     ctx.theme = @settings.theme == "Light" ? Egui::Theme.light : Egui::Theme.dark
 
@@ -272,11 +290,13 @@ class KodkodApp < Egui::App
         # it shows an "Open Folder…" shortcut instead of the tree.
         if @settings.show_explorer
           ctx.side_panel(:left, "explorer", width: 240.0) do |ui|
-            if (folder = @folder)
-              ui.label(File.basename(folder))
-              ui.separator
-              ui.scroll_area do |sui|
-                sui.file_tree("explorer", folder,
+            with_panel_font(ui.ctx) do
+              if (folder = @folder)
+                ui.label(File.basename(folder))
+                ui.separator
+                # The tree owns its scroll area (keyboard navigation
+                # scrolls the focused row into view).
+                ui.file_tree("explorer", folder,
                   active: @selected_file,
                   show_hidden: @settings.show_hidden,
                   chevrons: false) do |path|
@@ -285,11 +305,11 @@ class KodkodApp < Egui::App
                     open_path(path, existing: true)
                   end
                 end
-              end
-            else
-              ui.label(t("explorer.no_folder"))
-              if ui.button(t("explorer.open")).clicked?
-                open_folder
+              else
+                ui.label(t("explorer.no_folder"))
+                if ui.button(t("explorer.open")).clicked?
+                  open_folder
+                end
               end
             end
           end
@@ -340,52 +360,54 @@ class KodkodApp < Egui::App
         end
 
         ctx.bottom_panel("status") do |ui|
-          if @search_open
-            ui.text_edit_singleline(@search, hint: t("status.find_hint"),
-              focus_id: "kodkod-search") { |txt| @search = txt }
-            if ui.button(t("status.next")).clicked?
-              find_next
-            end
-            if ui.button(t("status.prev")).clicked?
-              find_next(backward: true)
-            end
-            if ui.button("✕").clicked?
-              @search_open = false
-            end
-          end
-          if (active = @docs[selected]?)
-            if (viewer = active.viewer?)
-              ui.label("#{t("status.viewer")}   #{viewer.status_info}   #{viewer.path}")
-            elsif (buffer = active.buffer?)
-              line, col = Kodkod::CodeEditor.cursor(ctx, buffer, active.focus_id.not_nil!)
-              mode = @vim.enabled? ? @vim.status_label : t("status.standard")
-              lang = buffer.lang || "plain"
-              path = buffer.path || buffer.name
-              # A ':' line being typed takes over the ruler spot (vim's
-              # command line sits over the Ln/Col area).
-              pos = @vim.enabled? && @vim.mode.command? \
-                ? ":#{@vim.command}█" : t("status.ruler", line: line + 1, col: col + 1)
-              ui.label("#{mode}   #{pos}   " \
-                       "#{lang}   #{path}#{active.dirty? ? t("status.modified") : ""}")
-            end
-          end
-          ui.label(@status)
-          if @show_fps
-            ctx.request_repaint
-            ui.label("FPS: #{"%.1f" % ctx.fps}")
-          end
-
-          # The VIM command-line feedback (bottom-most, like vim): the
-          # last command's result — errors red, warnings yellow. The
-          # line being typed lives up in the status bar, over the ruler.
-          if @vim.enabled?
-            if (msg = @vim.commands.last_message)
-              text = Egui::RichText.new(msg.text).code
-              case msg.kind
-              when .error? then text = text.color(Egui::Color32.rgb(0xf0, 0x5a, 0x5a))
-              when .warn?  then text = text.color(Egui::Color32.rgb(0xe0, 0xb0, 0x40))
+          with_panel_font(ui.ctx) do
+            if @search_open
+              ui.text_edit_singleline(@search, hint: t("status.find_hint"),
+                focus_id: "kodkod-search") { |txt| @search = txt }
+              if ui.button(t("status.next")).clicked?
+                find_next
               end
-              ui.rich(text)
+              if ui.button(t("status.prev")).clicked?
+                find_next(backward: true)
+              end
+              if ui.button("✕").clicked?
+                @search_open = false
+              end
+            end
+            if (active = @docs[selected]?)
+              if (viewer = active.viewer?)
+                ui.label("#{t("status.viewer")}   #{viewer.status_info}   #{viewer.path}")
+              elsif (buffer = active.buffer?)
+                line, col = Kodkod::CodeEditor.cursor(ctx, buffer, active.focus_id.not_nil!)
+                mode = @vim.enabled? ? @vim.status_label : t("status.standard")
+                lang = buffer.lang || "plain"
+                path = buffer.path || buffer.name
+                # A ':' line being typed takes over the ruler spot (vim's
+                # command line sits over the Ln/Col area).
+                pos = @vim.enabled? && @vim.mode.command? \
+                  ? ":#{@vim.command}█" : t("status.ruler", line: line + 1, col: col + 1)
+                ui.label("#{mode}   #{pos}   " \
+                         "#{lang}   #{path}#{active.dirty? ? t("status.modified") : ""}")
+              end
+            end
+            ui.label(@status)
+            if @show_fps
+              ctx.request_repaint
+              ui.label("FPS: #{"%.1f" % ctx.fps}")
+            end
+
+            # The VIM command-line feedback (bottom-most, like vim): the
+            # last command's result — errors red, warnings yellow. The
+            # line being typed lives up in the status bar, over the ruler.
+            if @vim.enabled?
+              if (msg = @vim.commands.last_message)
+                text = Egui::RichText.new(msg.text).code
+                case msg.kind
+                when .error? then text = text.color(Egui::Color32.rgb(0xf0, 0x5a, 0x5a))
+                when .warn?  then text = text.color(Egui::Color32.rgb(0xe0, 0xb0, 0x40))
+                end
+                ui.rich(text)
+              end
             end
           end
         end
