@@ -9,6 +9,8 @@ highlighting via the [highlight.cr](../myshards/highlight.cr) shard
 lazy-loading file tree, an image viewer tab (PNG/SVG), and a basic
 VIM modal layer.
 
+![kodkod screenshot](assets/screenshot.png)
+
 ## Build & run
 
 ```sh
