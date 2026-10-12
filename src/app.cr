@@ -115,7 +115,6 @@ class KodkodApp < Egui::App
   # The tab selection signal — focus follows it (see notepad).
   reactive selected = 0
   @folder : String? = nil
-  @selected_file : String? = nil
   @status = "Ready."
   # The dirty docs awaiting the confirm-close modal (a batch close
   # from the tab context menu walks them one by one — see close_batch).
@@ -295,15 +294,17 @@ class KodkodApp < Egui::App
                 ui.label(File.basename(folder))
                 ui.separator
                 # The tree owns its scroll area (keyboard navigation
-                # scrolls the focused row into view).
+                # scrolls the focused row into view). `active` is a
+                # pure function of the tab bar (reactive — see
+                # notepad): whichever way a file becomes current (tree
+                # click, Ctrl+O, Ctrl+P, ':' commands, tab switch) the
+                # explorer follows — expanding to it and scrolling it
+                # into view.
                 ui.file_tree("explorer", folder,
-                  active: @selected_file,
+                  active: @docs[selected]?.try(&.path),
                   show_hidden: @settings.show_hidden,
                   chevrons: false) do |path|
-                  if File.file?(path)
-                    @selected_file = path
-                    open_path(path, existing: true)
-                  end
+                  open_path(path, existing: true) if File.file?(path)
                 end
               else
                 ui.label(t("explorer.no_folder"))

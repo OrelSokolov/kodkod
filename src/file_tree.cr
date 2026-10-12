@@ -14,7 +14,9 @@
 # NOT become active (a toggled directory, a file the app declined to
 # open), painted as a dimmer fill. Every click records the touch in
 # Memory#data; once the touched row graduates to `active`, the touch
-# is forgotten. Icons are
+# is forgotten. When `active` CHANGES between frames the tree reveals
+# it reactively: the ancestor directories are expanded and the row is
+# scrolled into view (see `ui`). Icons are
 # compile-time-embedded lucide SVGs: folder / folder-open for
 # directories, a per-extension map for files, `file` as the fallback.
 #
@@ -109,31 +111,49 @@ module Kodkod
         @last_touched = ""
         memory.data.set_string(lt_id, "")
       end
+      # Reactive reveal: when the app-supplied `active` path CHANGES
+      # between frames (a tab switch, a fresh open), the tree follows
+      # the editor — expand the ancestor chain below so the walk
+      # renders the row this frame, then scroll it into view. Paths
+      # outside `root` expand nothing (the highlight matches no row).
+      active_id = base.child(Egui::Id.from("last_active").value)
+      memory.use_id(active_id) # survive end-frame pruning
+      @reveal = false
+      if (path = active) && path != memory.data.get_string(active_id)
+        @reveal = true
+        expand_to(memory, base, root, path)
+      end
+      memory.data.set_string(active_id, active || "")
       # The tree scrolls in its OWN area (a stable id under `base`) so
       # the focused row's rect, recorded during the walk, can be
       # brought into view afterwards (see scroll_focus_into_view).
       @focus_rect = nil
+      @active_rect = nil
       scroll_id = base.child(Egui::Id.from("scroll").value)
       viewport = Egui::ScrollArea.new(id: scroll_id).show(ui) do |inner|
         with_zoom(inner, base) do
           walk(inner, memory, base, root, 0, active, show_hidden, chevrons)
         end
       end
-      scroll_focus_into_view(ui.ctx, memory, scroll_id, viewport)
+      if (rect = @focus_rect)
+        scroll_rect_into_view(ui.ctx, memory, scroll_id, viewport, rect)
+      end
+      if @reveal && (rect = @active_rect)
+        scroll_rect_into_view(ui.ctx, memory, scroll_id, viewport, rect)
+      end
     end
 
-    # Keep the focused row inside the viewport after arrow navigation:
-    # the walk recorded its rect (screen coords); shifted into content
-    # space it must land in [offset.y, offset.y + viewport.height], with
-    # one row of context kept above/below. Writing the offset cell
-    # directly is picked up by the ScrollArea next frame; the kinetic
-    # velocity cell (id.child(3)) is zeroed so a leftover glide cannot
-    # fight the correction.
-    private def scroll_focus_into_view(ctx : Egui::Context,
-                                       memory : Egui::Memory, scroll_id : Egui::Id,
-                                       viewport : Egui::Rect) : Nil
-      rect = @focus_rect
-      return unless rect
+    # Keep a row inside the viewport after arrow navigation or a
+    # reveal: the walk recorded its rect (screen coords); shifted into
+    # content space it must land in [offset.y, offset.y +
+    # viewport.height], with one row of context kept above/below.
+    # Writing the offset cell directly is picked up by the ScrollArea
+    # next frame; the kinetic velocity cell (id.child(3)) is zeroed so
+    # a leftover glide cannot fight the correction.
+    private def scroll_rect_into_view(ctx : Egui::Context,
+                                      memory : Egui::Memory, scroll_id : Egui::Id,
+                                      viewport : Egui::Rect,
+                                      rect : Egui::Rect) : Nil
       offset = memory.data.get_vec2(scroll_id)
       content = memory.data.get_vec2(scroll_id.child(0))
       max_v = {content.y - viewport.height, 0.0}.max
@@ -190,6 +210,21 @@ module Kodkod
       ctx.memory.data.set_f64(id, (base + delta).round.clamp(FONT_MIN,
         FONT_MAX))
       ctx.request_repaint
+    end
+
+    # Open the root→path directory chain so the upcoming walk renders
+    # the active file's row this frame. Paths outside `root` expand
+    # nothing — the highlight simply matches no row.
+    private def expand_to(memory : Egui::Memory, base : Egui::Id,
+                          root : String, path : String) : Nil
+      prefix = root.ends_with?('/') ? root : root + '/'
+      return unless path.starts_with?(prefix)
+      dir = File.dirname(path)
+      while dir != "/" && dir != root
+        memory.data.set_bool(base.child(Egui::Id.from(dir).value), true)
+        dir = File.dirname(dir)
+      end
+      memory.data.set_bool(base.child(Egui::Id.from(root).value), true)
     end
 
     # Depth-first walk of the expanded directories; every visible row
@@ -250,6 +285,7 @@ module Kodkod
         Egui::Sense.click | Egui::Sense::Focusable)
       focused = response.has_focus?
       @focus_rect = row_rect if focused
+      @active_rect = row_rect if active
 
       if response.clicked?
         response.request_focus
@@ -345,6 +381,10 @@ module Kodkod
     @last_touched : String = ""
     # This frame's focused-row rect (screen coords), for scroll-into-view.
     @focus_rect : Egui::Rect?
+    # This frame's active-row rect, for the reveal scroll; @reveal says
+    # `active` changed since the previous frame.
+    @active_rect : Egui::Rect?
+    @reveal = false
   end
 end
 
@@ -355,8 +395,12 @@ class Egui::Ui
   # on click. `active:` is the open file's path (full selection fill);
   # every clicked row that does not become active (a toggled
   # directory, a file the app declined to open) keeps a dimmer
-  # last_touched highlight instead. `chevrons:` (default true) draws
-  # the ▸/▾ toggle arrows; false leaves the open/closed state to the
+  # last_touched highlight instead. When `active:` changes from the
+  # previous frame the tree REVEALS the file: its ancestor directories
+  # are expanded and the row is scrolled into view — pass it as a
+  # function of your tab bar and the explorer follows the editor with
+  # no extra wiring. `chevrons:` (default true) draws the ▸/▾ toggle
+  # arrows; false leaves the open/closed state to the
   # folder icons alone.
   #
   # The widget brings its own scroll area. Rows are keyboard-navigable:

@@ -161,6 +161,46 @@ describe Kodkod::FileTree do
     end
   end
 
+  it "reveals the active file reactively: expands ancestors, scrolls, once" do
+    ctx = Egui::Context.new
+    with_temp_dir do |dir|
+      Dir.mkdir(File.join(dir, "sub"))
+      # Directories sort first, so the off-screen target must be a
+      # LATE row: the last of sub/'s files.
+      40.times { |i| File.touch(File.join(dir, "sub", "g%02d.cr" % i)) }
+      sel = File.join(dir, "sub", "g39.cr")
+      base = Egui::Id.from("kodkod/file_tree/x")
+      sub_id = base.child(Egui::Id.from(File.join(dir, "sub")).value)
+      scroll_id = base.child(Egui::Id.from("scroll").value)
+
+      # A short window: the deep row is off-screen at offset 0.
+      raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
+        Egui::Vec2.new(300.0, 120.0)))
+      frame = ->(active : String?) do
+        ctx.begin_frame(raw)
+        ctx.central_panel do |ui|
+          ui.file_tree("x", dir, active: active) { |_p| }
+        end
+        ctx.end_frame
+      end
+
+      frame.call(nil) # register rows; nothing expanded, nothing scrolled
+      ctx.memory.data.get_bool(sub_id, false).should be_false
+      ctx.memory.data.get_vec2(scroll_id).y.should eq(0.0)
+
+      # A NEW active path: `sub` opens and the row scrolls into view.
+      frame.call(sel)
+      ctx.memory.data.get_bool(sub_id, false).should be_true
+      ctx.memory.data.get_vec2(scroll_id).y.should be > 0.0
+
+      # Same active next frame: no re-reveal — the user's own
+      # scrolling is not fought.
+      ctx.memory.data.set_vec2(scroll_id, Egui::Vec2.zero)
+      frame.call(sel)
+      ctx.memory.data.get_vec2(scroll_id).y.should eq(0.0)
+    end
+  end
+
   # Keyboard navigation: rows are focusable, Up/Down walk them, Enter
   # acts like a click. Row node ids come from the same scheme the
   # widget uses (base.child(Id.from(path).value)); focus requests are
