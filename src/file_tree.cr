@@ -91,6 +91,10 @@ module Kodkod
     ICON_SIZE = 16.0
     CHEVRON_W = 14.0
     INDENT = 14.0
+    # Vertical padding INSIDE a row. Rows stack flush (item_spacing.y
+    # is zeroed for the walk, see `ui`), so the breathing room between
+    # entries comes from here — the highlight bands stay contiguous.
+    ROW_PAD = 3.0
     FONT_SALT = 0xF017_u64 # Ctrl +/- font zoom override
     FONT_MIN = 8.0
     FONT_MAX = 40.0
@@ -127,17 +131,37 @@ module Kodkod
       # The tree scrolls in its OWN area (a stable id under `base`) so
       # the focused row's rect, recorded during the walk, can be
       # brought into view afterwards (see scroll_focus_into_view).
+      # Reset before the walk: this frame's focus target, if any.
       @focus_rect = nil
+      @focus_path = nil
       @active_rect = nil
       scroll_id = base.child(Egui::Id.from("scroll").value)
       viewport = Egui::ScrollArea.new(id: scroll_id).show(ui) do |inner|
-        with_zoom(inner, base) do
-          walk(inner, memory, base, root, 0, active, show_hidden, chevrons)
+        # Flush rows: zero the layout's item_spacing.y for the walk so
+        # rows stack with NO gap between their highlight bands — the
+        # spacing moves into the rows themselves (ROW_PAD in `row`),
+        # like a native file explorer list.
+        old_is = inner.style.spacing.item_spacing
+        inner.style.spacing.item_spacing = Egui::Vec2.new(old_is.x, 0.0)
+        begin
+          with_zoom(inner, base) do
+            walk(inner, memory, base, root, 0, active, show_hidden, chevrons)
+          end
+        ensure
+          inner.style.spacing.item_spacing = old_is
         end
       end
-      if (rect = @focus_rect)
+      # Follow the keyboard cursor ONLY when focus moves to a row:
+      # while it merely STAYS on a row (e.g. after the click that
+      # opened the file) the user's own scrolling is left alone —
+      # re-clamping every frame would pin the viewport to that row.
+      focus_cell = base.child(Egui::Id.from("last_focus").value)
+      memory.use_id(focus_cell) # survive end-frame pruning
+      if (rect = @focus_rect) && (path = @focus_path) &&
+         path != memory.data.get_string(focus_cell)
         scroll_rect_into_view(ui.ctx, memory, scroll_id, viewport, rect)
       end
+      memory.data.set_string(focus_cell, @focus_path || "")
       if @reveal && (rect = @active_rect)
         scroll_rect_into_view(ui.ctx, memory, scroll_id, viewport, rect)
       end
@@ -268,7 +292,7 @@ module Kodkod
       style = ui.style
       v = style.visuals
       line_h = {style.font_size * Egui::Fonts::LINE_H_FACTOR,
-        style.spacing.interact_size.y}.max
+        style.spacing.interact_size.y}.max + 2.0 * ROW_PAD
       indent = depth * INDENT
       rect = ui.allocate_at_least(
         Egui::Vec2.new(ui.max_rect.width - indent, line_h))
@@ -285,6 +309,7 @@ module Kodkod
         Egui::Sense.click | Egui::Sense::Focusable)
       focused = response.has_focus?
       @focus_rect = row_rect if focused
+      @focus_path = path if focused
       @active_rect = row_rect if active
 
       if response.clicked?
@@ -379,8 +404,10 @@ module Kodkod
     @on_activate : (String ->)?
     @last_touched_id : Egui::Id?
     @last_touched : String = ""
-    # This frame's focused-row rect (screen coords), for scroll-into-view.
+    # This frame's focused-row rect (screen coords) and path, for
+    # scroll-into-view on focus CHANGE (not every frame — see `ui`).
     @focus_rect : Egui::Rect?
+    @focus_path : String?
     # This frame's active-row rect, for the reveal scroll; @reveal says
     # `active` changed since the previous frame.
     @active_rect : Egui::Rect?
@@ -405,8 +432,9 @@ class Egui::Ui
   #
   # The widget brings its own scroll area. Rows are keyboard-navigable:
   # click (or Tab) focuses a row, Up/Down walk the visible rows, Enter
-  # toggles a folder or opens a file, and the focused row is scrolled
-  # into view automatically.
+  # toggles a folder or opens a file, and a row focus MOVES to is
+  # scrolled into view automatically (a row merely KEEPING focus never
+  # fights the user's own scrolling).
   def file_tree(id : String, root : String, active : String? = nil,
                 show_hidden : Bool = false, chevrons : Bool = true,
                 &on_activate : String ->) : Nil

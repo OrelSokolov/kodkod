@@ -11,6 +11,8 @@ require "./editor_buffer"
 require "./code_editor"
 require "./file_tree"
 require "./file_viewer"
+require "./about"
+require "./app_icon"
 require "./i18n"
 require "./vim_command"
 require "./vim_mode"
@@ -124,6 +126,13 @@ class KodkodApp < Egui::App
   @pending_close : Doc? = nil
   @quitting = false
   @show_fps = false
+  # The About modal: `@about_open` gates the routed modal page (see
+  # Kodkod::About); @about keeps the parsed icon across openings.
+  @about_open = false
+  @about : Kodkod::About
+  # Whether the caption icon raster is the dark-chrome (light-art)
+  # tint — nil before the first frame installs one.
+  @caption_dark : Bool? = nil
   @search_open = false
   @search = ""
   @settings : Settings = Egui::SystemPorts::AppConfig.load(
@@ -137,6 +146,7 @@ class KodkodApp < Egui::App
     super()
     @settings.theme = theme if theme
     @i18n.locale = @settings.language
+    @about = Kodkod::About.new(@i18n)
     @status = t("status.ready")
     @vim.enabled = @settings.vim
 
@@ -242,10 +252,24 @@ class KodkodApp < Egui::App
   def update(ctx : Egui::Context) : Nil
     ctx.theme = @settings.theme == "Light" ? Egui::Theme.light : Egui::Theme.dark
 
+    # The caption icon slot follows the theme: the monochrome art is
+    # baked in two tints (app_icon.cr) — near-white on the dark
+    # chrome, near-black on the light one. Swapped once per flip:
+    # WindowFrame.icon= invalidates the cached texture.
+    dark = ctx.theme.dark?
+    if dark != @caption_dark
+      @caption_dark = dark
+      Egui::WindowFrame.icon = Kodkod.icon_rgba(light: dark)
+    end
+
     unless @hotkeys_ready
       DEFAULT_BINDINGS.each { |action, combo| ctx.hotkeys.bind(combo, action) }
       @hotkeys_ready = true
     end
+
+    # Deep-link: `--page root/about` opens the modal (the same way
+    # root/settings deep-links; the router pops back on Close).
+    @about_open ||= ctx.router.current.page_id == "root/about"
 
     ctx.routes do |r|
       r.page "root/root" do
@@ -280,6 +304,11 @@ class KodkodApp < Egui::App
               ACTION_TOGGLE_VIM)
             menu.menu_item("#{@show_fps ? "✓ " : ""}#{t("menu.fps")}") do
               @show_fps = !@show_fps
+            end
+          end
+          bar.menu_button(t("menu.help")) do |menu|
+            menu.menu_item(t("menu.about")) do
+              open_about(ctx)
             end
           end
         end
@@ -475,6 +504,17 @@ class KodkodApp < Egui::App
           ui.label(t("confirm.body", title: pending_doc.title))
         end
       end
+
+      if @about_open
+        r.modal "root/about", title: t("about.title"), width: 420.0,
+          buttons: [t("about.close")],
+          on_button: ->(label : String) {
+            @about_open = false
+            ctx.router.back
+          } do |ui|
+          @about.show(ui)
+        end
+      end
     end
 
     # Files dropped onto the window open as tabs.
@@ -563,6 +603,12 @@ class KodkodApp < Egui::App
 
   private def lang_for(path : String) : String?
     LANG_BY_EXT[File.extname(path).downcase]?
+  end
+
+  # The About modal (a routed page — see Kodkod::About).
+  private def open_about(ctx : Egui::Context) : Nil
+    @about_open = true
+    ctx.router.navigate("root/about")
   end
 
   private def new_doc : Nil

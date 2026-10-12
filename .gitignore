@@ -3,3 +3,6 @@
 /.crystal-cache/
 *.dwarf
 /tmp_*
+/build/
+/builds/
+/crosspacks/

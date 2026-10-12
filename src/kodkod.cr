@@ -13,6 +13,7 @@ require "./code_editor"
 require "./vim_command"
 require "./file_tree"
 require "./file_viewer"
+require "./about"
 require "./fuzzy"
 require "./quick_open"
 require "./vim_mode"
@@ -84,4 +85,6 @@ if (route = cli[:route])
 end
 Egui::Backend::Sokol.run(app,
   title: "kodkod", width: 1200, height: 800,
+  # The taskbar/window icon (Win32; see app_icon.cr for the tints).
+  icon: Kodkod.icon_rgba(light: false),
   decorations: false, inspector: :hidden)

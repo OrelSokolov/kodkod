@@ -61,6 +61,14 @@ module Kodkod
         "menu.settings_open"   => "Settings…",
         "menu.vim"             => "VIM mode (Ctrl+Alt+V)",
         "menu.fps"             => "Show FPS",
+        "menu.help"            => "Help",
+        "menu.about"           => "About kodkod",
+        # about tab
+        "about.title"          => "About",
+        "about.tagline"        => "A code editor on egui-cr",
+        "about.features"       => "Rope buffer · highlight.cr syntax · lazy file tree · VIM mode",
+        "about.license"        => "MIT license",
+        "about.close"          => "Close",
         # tab context menu
         "tab.close"            => "Close",
         "tab.close_others"     => "Close Others",
@@ -149,6 +157,14 @@ module Kodkod
         "menu.settings_open"   => "Настройки…",
         "menu.vim"             => "Режим VIM (Ctrl+Alt+V)",
         "menu.fps"             => "Показывать FPS",
+        "menu.help"            => "Справка",
+        "menu.about"           => "О программе",
+        # about tab
+        "about.title"          => "О программе",
+        "about.tagline"        => "Редактор кода на egui-cr",
+        "about.features"       => "Rope-буфер · подсветка highlight.cr · ленивое дерево файлов · режим VIM",
+        "about.license"        => "Лицензия MIT",
+        "about.close"          => "Закрыть",
         # tab context menu
         "tab.close"            => "Закрыть",
         "tab.close_others"     => "Закрыть остальные",

@@ -310,6 +310,36 @@ describe Kodkod::FileTree do
         ctx.memory.data.get_vec2(scroll_id).y.should be > 0.0
       end
     end
+
+    it "keeps the user's scroll while focus merely stays on a row" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        40.times { |i| File.touch(File.join(dir, "f%02d.txt" % i)) }
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        scroll_id = base.child(Egui::Id.from("scroll").value)
+
+        raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
+          Egui::Vec2.new(300.0, 120.0)))
+        frame = -> do
+          ctx.begin_frame(raw)
+          ctx.central_panel do |ui|
+            ui.file_tree("x", dir) { |_p| }
+          end
+          ctx.end_frame
+        end
+
+        frame.call # register rows
+        ctx.memory.focus.request(root_id)
+        frame.call # focus takes hold (like the click that opened a file)
+
+        # The user scrolls the tree away from the focused row; the
+        # viewport must NOT be pulled back on the following frames.
+        ctx.memory.data.set_vec2(scroll_id, Egui::Vec2.new(0.0, 500.0))
+        3.times { frame.call }
+        ctx.memory.data.get_vec2(scroll_id).y.should eq(500.0)
+      end
+    end
   end
 end
 

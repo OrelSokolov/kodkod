@@ -154,6 +154,91 @@ describe Kodkod::CodeEditor do
     y + line_h.should be <= off + view_h
   end
 
+  it "follows the caret back up when Backspace shortens the buffer" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("")
+    Kodkod::CodeEditor.request_focus(ctx, "t1")
+    2.times { |i| editor_frame(ctx, b, rows: 100, time: 0.016 * (i + 1)) }
+    # Grow the file past the viewport (held Enter): the caret parks at
+    # the end and the view scrolls it into view near the bottom.
+    Kodkod::CodeEditor.replace_range(ctx, b, "t1", 0, 0, "\n" * 60)
+    editor_frame(ctx, b, rows: 100, time: 0.064)
+    wid = Kodkod::CodeEditor.widget_id("t1")
+    sid = wid.child(Kodkod::CodeEditor::SCROLL_SALT)
+    line_h = ctx.memory.data.get_f64(wid.child(Kodkod::CodeEditor::LINE_H_SALT), 20.0)
+    view_h = ctx.memory.data.get_f64(wid.child(Kodkod::CodeEditor::VIEW_H_SALT), 400.0)
+    off0 = ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).y
+    off0.should be > 0.0 # the view is scrolled down into the tail
+
+    # Held Backspace: the newlines merge away, the caret climbs and the
+    # buffer shrinks. The view must ride back up with the caret — a
+    # one-sided follow leaves it parked deep past the shrunken content
+    # and the screen goes blank (everything above the fold).
+    65.times do |i|
+      editor_frame(ctx, b, rows: 100,
+        events: [Egui::Event.key_pressed(Egui::KeyCode::Backspace)] of Egui::Event,
+        time: 0.08 + 0.016 * i)
+    end
+    b.text.should eq("")
+    off = ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).y
+    off.should eq(0.0) # the view rode back up with the caret
+    # And mid-hold the caret line stays inside the visible window.
+    Kodkod::CodeEditor.replace_range(ctx, b, "t1", 0, 0, "\n" * 60)
+    editor_frame(ctx, b, rows: 100, time: 1.2)
+    30.times do |i|
+      editor_frame(ctx, b, rows: 100,
+        events: [Egui::Event.key_pressed(Egui::KeyCode::Backspace)] of Egui::Event,
+        time: 1.3 + 0.016 * i)
+    end
+    off = ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).y
+    cursor = Kodkod::CodeEditor.cursor_offset(ctx, "t1")
+    y = (b.rope.line_of(cursor)).to_f64 * line_h
+    off.should be <= y + 0.01
+    y + line_h.should be <= off + view_h + 0.01
+
+    # After riding up, the caret is visible and never sits within the
+    # top margin: at least CONTEXT_ROWS rows of text show above it
+    # (unless the file starts inside that margin, where off clamps 0).
+    25.times do |i|
+      editor_frame(ctx, b, rows: 100,
+        events: [Egui::Event.key_pressed(Egui::KeyCode::Up)] of Egui::Event,
+        time: 2.0 + 0.016 * i)
+    end
+    Kodkod::CodeEditor.cursor_offset(ctx, "t1").should eq(5) # line 5
+    off = ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).y
+    y = 5.0 * line_h
+    y + line_h.should be <= off + view_h + 0.01
+    off.should be <= {y - 2.0 * line_h, 0.0}.max + 0.01
+  end
+
+  it "steps one line per caret move at the bottom edge (no big jump)" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("\n" * 60) # 61 lines
+    Kodkod::CodeEditor.request_focus(ctx, "t1")
+    2.times { |i| editor_frame(ctx, b, rows: 100, time: 0.016 * (i + 1)) }
+    wid = Kodkod::CodeEditor.widget_id("t1")
+    sid = wid.child(Kodkod::CodeEditor::SCROLL_SALT)
+    line_h = ctx.memory.data.get_f64(wid.child(Kodkod::CodeEditor::LINE_H_SALT), 20.0)
+    # Hold Down: once the caret rides the bottom margin the view must
+    # glide a line at a time. Firing the push-down only at the very
+    # edge makes it correct in one 3-line jump instead.
+    prev = ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).y
+    65.times do |i|
+      editor_frame(ctx, b, rows: 100,
+        events: [Egui::Event.key_pressed(Egui::KeyCode::Down)] of Egui::Event,
+        time: 0.032 + 0.016 * i)
+      off = ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).y
+      (off - prev).should be <= line_h + 0.01
+      prev = off
+    end
+    # The ride ends with the LAST line pinned to the bottom of the
+    # view — the context margin never invents rows past the buffer end.
+    view_h = ctx.memory.data.get_f64(wid.child(Kodkod::CodeEditor::VIEW_H_SALT), 400.0)
+    off = ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).y
+    y = 60.0 * line_h # caret on the last line
+    (off + view_h - (y + line_h)).should be_close(0.0, 0.01)
+  end
+
   it "keeps a big buffer cheap per frame (virtualization)" do
     ctx = Egui::Context.new
     line = "the quick brown fox jumps over the lazy dog\n"

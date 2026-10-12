@@ -42,6 +42,9 @@ module Kodkod
     BAR_W        =        8.0
     HBAR_H       =        6.0
     GUTTER_PAD   =       10.0
+    # Context rows kept above (and below) the caret when the follow
+    # pulls the view: the caret lands third from the top, not first.
+    CONTEXT_ROWS =          2
     ID_PREFIX    = "kodkod/code_editor/"
     FONT_MIN     = 8.0
     FONT_MAX     = 40.0
@@ -380,10 +383,34 @@ module Kodkod
         kin.takeover
         line = rope.line_of(cursor)
         y = line.to_f64 * line_h
-        v_off = y.clamp(v_off, {y + line_h - view_h, v_off}.max)
+        # Two-sided, like scroll_to_line: push down when the caret is
+        # below the view, pull up when it is above. The pull-up is what
+        # keeps Backspace (eating newlines makes the caret climb fast
+        # while the buffer shrinks) from outrunning the top of the
+        # view — without it the content ends up entirely above the
+        # viewport and the screen goes blank. Both edges keep
+        # CONTEXT_ROWS rows of text past the caret (three rows stay
+        # readable around it, never just the caret row), and the
+        # trigger fires as soon as the caret ENTERS the margin — the
+        # view then steps one line per move, not one big corrective
+        # jump once the edge is finally hit. The context margin is
+        # capped by the end of the buffer (rope.line_count is fresh —
+        # an edit inside this frame already shrank it): at EOF the
+        # caret rides down to the very bottom of the view instead of
+        # idling two phantom rows above it.
+        if y + line_h > v_off + view_h - CONTEXT_ROWS * line_h
+          v_off = { {y + CONTEXT_ROWS * line_h + line_h - view_h,
+                     rope.line_count.to_f64 * line_h - view_h}.min, 0.0 }.max
+        elsif y < v_off + CONTEXT_ROWS * line_h
+          v_off = {y - CONTEXT_ROWS * line_h, 0.0}.max
+        end
         col = rope.line_col_of(cursor)[1]
         cx = col_x(rope.line_text(line), col, fonts, font_size)
-        h_off = cx.clamp(h_off, {cx + char_w - view_w, h_off}.max)
+        if cx + char_w > h_off + view_w
+          h_off = cx + char_w - view_w
+        elsif cx < h_off
+          h_off = cx
+        end
         h_off = h_off.clamp(0.0, {wmax + char_w * 4.0 - view_w, 0.0}.max)
       end
 

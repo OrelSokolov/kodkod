@@ -1,0 +1,208 @@
+# crosspack.yml — the single build & pack config for kodkod.
+# Full pipeline (deps → build → pack), driven by the crosspack gem:
+#
+#   crosspack deps ubuntu-24.04          # verify/install build host deps
+#   crosspack build ubuntu-24.04         # run the matrix entry -> builds/
+#   crosspack pack ubuntu-24.04          # builds/<target> -> crosspacks/<target>
+#
+# Modeled on ~/hvoice/crosspack.yml. The build matrix steps call the
+# project rake tasks (icons, build:release) that compile everything
+# into build/bin; artifacts fan out into builds/<family>/<version>/<arch>/.
+# The egui.cr and highlight.cr shards are PATH dependencies (../egui.cr,
+# ../myshards/highlight.cr) — they must exist on the build host; the
+# native static library is built there automatically when missing
+# (rake build:native).
+
+name: kodkod
+version: 0.1.0              # keep in step with shard.yml and AboutTab::VERSION
+
+build:
+  output: builds
+
+  # Build dependencies of the host (axis "where we build"): verified and
+  # installed per system before the matrix steps run. Selectors: distro id
+  # (ubuntu), ID_LIKE (debian), os (linux/darwin/windows), "*".
+  deps:
+    crystal:
+      hosts:
+        ubuntu: { verify: crystal version, install: curl -fsSL https://crystal-lang.org/install.sh | sudo bash }
+        debian: { verify: crystal version, install: curl -fsSL https://crystal-lang.org/install.sh | sudo bash }
+        fedora: { verify: crystal version, install: curl -fsSL https://crystal-lang.org/install.sh | sudo bash }
+        arch: { verify: crystal version, install: curl -fsSL https://crystal-lang.org/install.sh | sudo bash }
+        darwin: { verify: crystal version, install: brew install crystal }
+        windows: { verify: crystal version }   # MSYS2/RubyInstaller setup — manual
+    rake:
+      hosts:
+        ubuntu: { install: sudo apt-get install -y ruby rake }
+        debian: { install: sudo apt-get install -y ruby rake }
+        fedora: { install: sudo dnf install -y ruby rubygem-rake }
+        arch: { install: sudo pacman -S --needed --noconfirm ruby ruby-rake }
+        darwin: { verify: rake --version }    # ships with the system ruby
+        windows: { verify: rake --version }   # RubyInstaller brings it
+    imagemagick:
+      hosts:
+        ubuntu: { verify: magick -version, install: sudo apt-get install -y imagemagick }
+        debian: { verify: magick -version, install: sudo apt-get install -y imagemagick }
+        fedora: { verify: magick -version, install: sudo dnf install -y ImageMagick }
+        arch: { verify: magick -version, install: sudo pacman -S --needed --noconfirm imagemagick }
+        darwin: { verify: magick -version, install: brew install imagemagick }
+        windows: { verify: magick -version, install: winget install --id ImageMagick.ImageMagick -e --accept-source-agreements --accept-package-agreements }
+    build-essential:
+      # The C toolchain: the native sokol lib (rake build:native in the
+      # egui.cr checkout) and the final link both need cc + binutils.
+      hosts:
+        ubuntu: { verify: cc --version, install: sudo apt-get install -y build-essential }
+        debian: { verify: cc --version, install: sudo apt-get install -y build-essential }
+        fedora: { verify: cc --version, install: sudo dnf install -y gcc gcc-c++ make }
+        arch: { verify: cc --version, install: sudo pacman -S --needed --noconfirm base-devel }
+        darwin: { verify: cc --version, install: xcode-select --install }
+        windows: { verify: link /? }          # MSVC ships with the Crystal/MSYS2 toolchain
+
+  # One entry per build host (native builds — the Rakefile already
+  # picks the right native lib and link flags per host).
+  matrix:
+    - id: linux
+      build: linux/amd64
+      steps:
+        - rake artifacts:linux
+      artifacts:
+        from: build/bin
+        include: [kodkod]
+        to: [ubuntu-22.04, ubuntu-24.04, ubuntu-25.10, ubuntu-26.04,
+             debian-12, debian-13]
+
+    - id: windows
+      build: windows/amd64
+      steps:
+        - rake artifacts:windows
+      artifacts:
+        from: build/bin
+        include: ["kodkod.exe"]
+        to: [windows-11]
+
+    - id: macos
+      build: darwin/arm64
+      steps:
+        - rake artifacts:macos
+      artifacts:
+        from: build/bin
+        include: [kodkod]
+        to: [macos]
+
+package:
+  maintainer: Oleg <orelcokolov@gmail.com>
+  summary: kodkod - code editor on egui-cr
+  description: |-
+    kodkod — a VSCode/Zed-like code editor built on egui-cr: a rope
+    buffer for huge files, syntax highlighting via the highlight.cr
+    shard, a lazy-loading file tree and basic VIM modal editing.
+  license: MIT
+  section: editors
+
+  sources: builds
+  prefix: usr/local
+  lib_dir: lib/kodkod
+
+  payload:
+    kodkod:
+      "*": kodkod
+      windows: kodkod.exe
+
+  executables: [kodkod]
+
+  links:
+    bin/kodkod: ../lib/kodkod/kodkod
+
+  desktop:
+    name: kodkod
+    comment: Code editor (rope buffer, VIM mode)
+    categories: Development;Utility;
+
+  icon: build/appicon.png
+  min_macos: '11.0'
+
+deps:
+  # Runtime dependencies of the package (axis "what we pack for"):
+  # the sokol backend links OpenGL/GLX + X11 (see ldd bin/kodkod).
+  # NOTE: the package list of ONE key is ordered ALTERNATIVES (deb
+  # "a | b") — every hard requirement gets its own key, joined by
+  # the builder with commas.
+  gl:
+    targets:
+      debian:
+        "*": [libgl1]                       # libglx0 rides along via glvnd
+      ubuntu:
+        "*": [libgl1]
+      fedora:
+        "*": [mesa-libGL]
+      arch:
+        "*": [libglvnd]
+      opensuse:
+        "*": [libGL1]
+      macos: system                          # OpenGL framework — part of the OS
+      windows: system                        # opengl32.dll — system DLL
+
+  x11:
+    targets:
+      debian:
+        "*": [libx11-6]
+      ubuntu:
+        "*": [libx11-6]
+      fedora:
+        "*": [libX11]
+      arch:
+        "*": [libx11]
+      opensuse:
+        "*": [libX11-6]
+      macos: none                            # Cocoa — no X11
+      windows: none                          # Win32 — no X11
+
+  xcursor:
+    targets:
+      debian: { "*": [libxcursor1] }
+      ubuntu: { "*": [libxcursor1] }
+      fedora: { "*": [libXcursor] }
+      arch: { "*": [libxcursor] }
+      opensuse: { "*": [libXcursor1] }
+      macos: none
+      windows: none
+
+  xext:
+    targets:
+      debian: { "*": [libxext6] }
+      ubuntu: { "*": [libxext6] }
+      fedora: { "*": [libXext] }
+      arch: { "*": [libxext] }
+      opensuse: { "*": [libXext6] }
+      macos: none
+      windows: none
+
+  xfixes:
+    targets:
+      debian: { "*": [libxfixes3] }
+      ubuntu: { "*": [libxfixes3] }
+      fedora: { "*": [libXfixes] }
+      arch: { "*": [libxfixes] }
+      opensuse: { "*": [libXfixes3] }
+      macos: none
+      windows: none
+
+  xi:
+    targets:
+      debian: { "*": [libxi6] }
+      ubuntu: { "*": [libxi6] }
+      fedora: { "*": [libXi] }
+      arch: { "*": [libxi] }
+      opensuse: { "*": [libXi6] }
+      macos: none
+      windows: none
+
+  xrender:
+    targets:
+      debian: { "*": [libxrender1] }
+      ubuntu: { "*": [libxrender1] }
+      fedora: { "*": [libXrender] }
+      arch: { "*": [libxrender] }
+      opensuse: { "*": [libXrender1] }
+      macos: none
+      windows: none
