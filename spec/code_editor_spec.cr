@@ -111,6 +111,52 @@ describe Kodkod::CodeEditor do
     Kodkod::CodeEditor.cursor_offset(ctx, "t1").should eq(7)
   end
 
+  it "scrolls horizontally to a caret that jumped between frames" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("a" * 4000) # one long line
+    editor_frame(ctx, b)
+    Kodkod::CodeEditor.request_focus(ctx, "t1")
+    editor_frame(ctx, b, time: 0.032)
+    sid = Kodkod::CodeEditor.widget_id("t1")
+      .child(Kodkod::CodeEditor::SCROLL_SALT)
+
+    # VIM-style jump BETWEEN frames ($/w/:123 all write the caret
+    # cell via the class API — no in-frame move signal). The view
+    # must follow the caret horizontally, not wait for the next edit.
+    Kodkod::CodeEditor.set_cursor_offset(ctx, b, "t1", 3999)
+    editor_frame(ctx, b, time: 0.048)
+    ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).x.should be > 0.0
+
+    # And back to the line start: the view follows left as well.
+    Kodkod::CodeEditor.set_cursor_offset(ctx, b, "t1", 0)
+    editor_frame(ctx, b, time: 0.064)
+    ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).x.should eq(0.0)
+  end
+
+  it "keeps the horizontal view while editing mid–long-line" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("a" * 4000) # one long line
+    editor_frame(ctx, b)
+    Kodkod::CodeEditor.request_focus(ctx, "t1")
+    editor_frame(ctx, b, time: 0.032)
+    Kodkod::CodeEditor.set_cursor_offset(ctx, b, "t1", 2000) # mid-line
+    editor_frame(ctx, b, time: 0.048)
+    sid = Kodkod::CodeEditor.widget_id("t1")
+      .child(Kodkod::CodeEditor::SCROLL_SALT)
+
+    # Typing mid-line: caret-follow scrolls the caret into view and
+    # the edit bumps the buffer version.
+    editor_frame(ctx, b,
+      events: [Egui::Event.text_input("x")] of Egui::Event, time: 0.064)
+    ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).x.should be > 0.0
+
+    # The idle frames AFTER the edit used to clamp h_off back to 0
+    # (wmax reset per buffer version, then the extent-0 clamp) — the
+    # view snapped to column 0 on every keystroke in a long line.
+    3.times { |i| editor_frame(ctx, b, time: 0.08 + 0.016 * i) }
+    ctx.memory.data.get_vec2(sid, Egui::Vec2.zero).x.should be > 0.0
+  end
+
   it "scrolls the wheel when rows exceeds the visible area" do
     ctx = Egui::Context.new
     b = Kodkod::EditorBuffer.new(

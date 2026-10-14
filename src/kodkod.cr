@@ -18,31 +18,33 @@ require "./fuzzy"
 require "./quick_open"
 require "./vim_mode"
 require "./app"
+require "./cli"
 
 # Entry point: the framework CLI parse pulls --page out of ARGV (in
 # place — the file arguments left over go to the app).
 cli = Egui::CLI.parse(ARGV)
-# `--theme Dark|Light` and `--dir PATH` — run overrides pulled out of
-# the file list before the app sees it.
-theme = nil
+# Standard OptionParser over the rest: --theme/--dir overrides plus
+# --help/--version (src/cli.cr). Positional arguments are files
+# opened in tabs at startup.
+opts = Kodkod::CLIOptions.parse(cli[:argv])
+if (msg = opts.error)
+  STDERR.puts "kodkod: #{msg}"
+  STDERR.puts opts.help_text
+  exit 1
+end
+if opts.help?
+  puts opts.help_text
+  exit
+end
+if opts.version?
+  puts "kodkod #{Kodkod::VERSION}"
+  exit
+end
+theme = opts.theme
 # Default the workspace to the directory kodkod was launched from;
 # `--dir PATH` overrides it.
-dir = Dir.current
-files = [] of String
-argv = cli[:argv].dup
-argv.each_with_index do |arg, i|
-  if arg == "--theme" && (value = argv[i + 1]?)
-    theme = value
-  elsif argv[i - 1]? == "--theme"
-    next
-  elsif arg == "--dir" && (value = argv[i + 1]?)
-    dir = value
-  elsif argv[i - 1]? == "--dir"
-    next
-  else
-    files << arg
-  end
-end
+dir = opts.dir
+files = opts.files
 # Monospace face for code: the editor, the ':' command line and inline
 # code all paint through the "monospace" family (Context#mono_fonts).
 # Hack — the FIRST face of upstream egui's Monospace family — shipped

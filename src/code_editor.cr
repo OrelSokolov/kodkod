@@ -30,6 +30,7 @@ module Kodkod
 
     ANCHOR_SALT  = 0x5EED_u64 # selection anchor char offset (-1 = none)
     COL_SALT     = 0x0C01_u64 # desired column (sticky up/down column)
+    SEEN_SALT    = 0x5E2A_u64 # caret offset as last RENDERED (see below)
     SCROLL_SALT  = 0x5C40_u64 # scroll offset vec2 (x = horizontal)
     VEL_SALT     =  0x7E1_u64 # kinetic velocity
     BAR_SALT     = 0xBA2_u64  # vertical scrollbar grab
@@ -248,6 +249,7 @@ module Kodkod
       id = @focus_id ? CodeEditor.widget_id(@focus_id.not_nil!) : ui.next_widget_id
       anchor_id = id.child(ANCHOR_SALT)
       col_id = id.child(COL_SALT)
+      seen_id = id.child(SEEN_SALT)
       scroll_id = id.child(SCROLL_SALT)
       vel_id = scroll_id.child(3)
       # State cells with no #interact call of their own must be marked
@@ -256,6 +258,7 @@ module Kodkod
       # max line width would all reset every frame.
       memory.use_id(anchor_id)
       memory.use_id(col_id)
+      memory.use_id(seen_id)
       memory.use_id(vel_id)
       memory.use_id(id.child(LINE_H_SALT))
       memory.use_id(id.child(VIEW_H_SALT))
@@ -291,14 +294,15 @@ module Kodkod
       max_offset = {content_h - view_h, 0.0}.max
 
       # Running max line width (content width for the horizontal
-      # scrollbar), reset per buffer version — only laid-out lines
-      # contribute, so it grows as the user scrolls long lines past.
+      # scrollbar) — only laid-out lines contribute, so it grows as
+      # the user scrolls long lines past. The previous frame's value
+      # stays in force UNTIL this frame's rows are measured below:
+      # zeroing it here on a version bump used to clamp h_off to 0
+      # for a frame (the clamp below), snapping the view to column 0
+      # on every edit of a long line. The shrink to freshly measured
+      # widths happens at the row-build store below.
       wm_ver = id.child(WMAXV_SALT)
       wm_id = id.child(WMAX_SALT)
-      if memory.data.get_int(wm_ver, -1) != rope.version
-        memory.data.set_int(wm_ver, rope.version)
-        memory.data.set_f64(wm_id, 0.0)
-      end
       wmax = memory.data.get_f64(wm_id, 0.0)
 
       # --- vertical kinetic scroll + horizontal wheel -----------------
@@ -336,6 +340,14 @@ module Kodkod
 
       cursor = memory.data.get_int(id, 0).clamp(0, rope.size)
       cursor_prev = cursor
+      # The caret as last RENDERED. Class-API caret jumps (VIM's
+      # w/$/f, :123, quick-open) write the cursor cell BETWEEN frames,
+      # so `cursor != cursor_prev` cannot see them — both sides read
+      # the same already-updated cell this frame. Comparing against
+      # the seen cell can, arming the caret-follow below: a caret that
+      # jumped off-screen from OUTSIDE the frame must still scroll the
+      # view to itself.
+      cursor_seen = memory.data.get_int(seen_id, cursor)
       anchor = memory.data.get_int(anchor_id, -1)
       edited = false
 
@@ -380,7 +392,10 @@ module Kodkod
       anchor = -1 if anchor > rope.size
 
       # --- follow the caret -------------------------------------------
-      if edited || cursor != cursor_prev
+      # `cursor != cursor_seen` covers between-frame jumps (see the
+      # seen-cell comment above); the other two cover in-frame moves
+      # (keyboard/mouse) and edits.
+      if edited || cursor != cursor_prev || cursor != cursor_seen
         kin.takeover
         line = rope.line_of(cursor)
         y = line.to_f64 * line_h
@@ -412,10 +427,17 @@ module Kodkod
         elsif cx < h_off
           h_off = cx
         end
-        h_off = h_off.clamp(0.0, {wmax + char_w * 4.0 - view_w, 0.0}.max)
+        # The clamp's extent rides the possibly-stale wmax; the
+        # caret's own column is always a valid lower bound for the
+        # content width (this edit may have just WIDENED the line
+        # past the stored maximum — clamping against the stale value
+        # would park the caret past the right edge).
+        extent = {wmax, cx + char_w * 4.0}.max + char_w * 4.0 - view_w
+        h_off = h_off.clamp(0.0, {extent, 0.0}.max)
       end
 
       memory.data.set_int(id, cursor)
+      memory.data.set_int(seen_id, cursor)
       memory.data.set_int(anchor_id, anchor)
       memory.data.set_int(col_id, rope.line_col_of(cursor)[1]) unless
         @keyboard && response.has_focus? && vertical_key?(input)
@@ -452,6 +474,7 @@ module Kodkod
       # wmax and thus the hscroll extent.
       vis_l = h_off - char_w * 2.0
       vis_r = h_off + view_w + char_w * 2.0
+      fresh = 0.0 # this frame's max over measured (visible) rows
       (lv0...k1).each do |li|
         s = rope.line_start(li)
         text = rope.line_text(li)
@@ -500,8 +523,19 @@ module Kodkod
         rows << Egui::Galley::Row.new(runs, w, line_h, li.to_f64 * line_h,
           row_ascent, li > 0)
         wmax = {wmax, w}.max
+        fresh = {fresh, w}.max
       end
-      memory.data.set_f64(wm_id, wmax)
+      # Version bumped since the stored max (an edit): the stored
+      # value may outlive lines that shrank or vanished — reseed it
+      # from the widths just measured. The stale maximum still serves
+      # this frame's scrollbar/clamps (wmax above), so the extent
+      # never dips to 0 mid-edit.
+      if memory.data.get_int(wm_ver, -1) != rope.version
+        memory.data.set_int(wm_ver, rope.version)
+        memory.data.set_f64(wm_id, fresh)
+      else
+        memory.data.set_f64(wm_id, wmax)
+      end
       galley = Egui::Galley.new(rows)
 
       # --- painting ----------------------------------------------------
@@ -571,24 +605,31 @@ module Kodkod
       # col*char_w grid drifts as fallback glyphs advance differently)
       # and re-draws the character under it in the editor background
       # (inverse video); :bar (VIM insert) is a thin bar at the cell's
-      # left edge.
+      # left edge. Both track the row's TEXT geometry, not the row
+      # center: the galley baseline (row_ascent) seats the em box |desc|
+      # BELOW the row center (desc < 0), so a row-centered caret and
+      # inverse char read a couple pixels higher than the glyphs.
       if response.has_focus? &&
          (@cursor_blinks ? (input.time % 1.0) < 0.6 : true)
         line, col = rope.line_col_of(cursor)
         text = rope.line_text(line)
         x = inner.min.x + col_x(text, col, fonts, font_size) - h_off
-        y = inner.min.y + line.to_f64 * line_h - v_off
+        baseline = inner.min.y + line.to_f64 * line_h - v_off + row_ascent
+        box_top = baseline - asc + 1.0 # em box, inset 1px like a row band
+        box_h = {asc - desc - 2.0, 2.0}.max
         if @cursor_style == :bar
-          painter.rect(Egui::Rect.from_min_size(Egui::Pos2.new(x, y + 1.0),
-            Egui::Vec2.new(2.0, line_h - 2.0)), 0.0, visuals.text_color)
+          painter.rect(Egui::Rect.from_min_size(Egui::Pos2.new(x, box_top),
+            Egui::Vec2.new(2.0, box_h)), 0.0, visuals.text_color)
         else
           w = col_x(text, col + 1, fonts, font_size) -
               col_x(text, col, fonts, font_size)
           w = fonts.measure(" ", font_size).x if w <= 0.0 # EOL cell
-          painter.rect(Egui::Rect.from_min_size(Egui::Pos2.new(x, y + 1.0),
-            Egui::Vec2.new(w, line_h - 2.0)), 0.0, visuals.text_color)
+          painter.rect(Egui::Rect.from_min_size(Egui::Pos2.new(x, box_top),
+            Egui::Vec2.new(w, box_h)), 0.0, visuals.text_color)
           if (ch = text[col]?)
-            painter.text(Egui::Pos2.new(x, y + line_h / 2.0),
+            # The run's own anchor (paint_galley): baseline minus half
+            # the em box — lands the inverse glyph exactly on its ink.
+            painter.text(Egui::Pos2.new(x, baseline - (asc + desc) / 2.0),
               ch.to_s, font_size, visuals.window_fill, family: "monospace")
           end
         end
