@@ -28,12 +28,14 @@ class KodkodApp < Egui::App
     property show_hidden : Bool = false
     property show_explorer : Bool = true
     property cursor_blinks : Bool = true
+    property syntax_highlight : Bool = true
     property language : String = "en"
 
     def initialize(@theme : String = "Dark", @vim : Bool = true,
                    @show_hidden : Bool = false,
                    @show_explorer : Bool = true,
                    @cursor_blinks : Bool = true,
+                   @syntax_highlight : Bool = true,
                    @language : String = "en")
     end
   end
@@ -367,7 +369,10 @@ class KodkodApp < Egui::App
                 rows: 100, cursor_style: @vim.cursor_style,
                 cursor_blinks: !@vim.enabled? && @settings.cursor_blinks,
                 # VIM highlights the caret cell, not the whole line.
-                cursor_line: !@vim.enabled?)
+                cursor_line: !@vim.enabled?,
+                # Off = render plain (no tokenization/measured token
+                # runs) — the long-line/minified-file escape hatch.
+                syntax_highlight: @settings.syntax_highlight)
             end
 
             # ACTIVE TAB = ACTIVE EDITOR, reactively (see notepad).
@@ -475,6 +480,10 @@ class KodkodApp < Egui::App
         end
         if ui.selectable_label(@settings.cursor_blinks, t("settings.blink")).clicked?
           @settings.cursor_blinks = !@settings.cursor_blinks
+          save_settings
+        end
+        if ui.selectable_label(@settings.syntax_highlight, t("settings.syntax")).clicked?
+          @settings.syntax_highlight = !@settings.syntax_highlight
           save_settings
         end
         ui.separator

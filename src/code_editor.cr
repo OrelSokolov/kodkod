@@ -55,7 +55,8 @@ module Kodkod
                    @tab : String = "  ", @rows : Int32 = 25,
                    @cursor_style : Symbol = :block,
                    @cursor_blinks : Bool = true,
-                   @cursor_line : Bool = true)
+                   @cursor_line : Bool = true,
+                   @syntax_highlight : Bool = true)
     end
 
     # Global (ui-scope-independent) widget id — see the file header.
@@ -439,12 +440,26 @@ module Kodkod
       # paint_galley places the glyphs exactly on the row centers.
       asc, desc = fonts.metrics_at(font_size)
       row_ascent = (line_h + asc - desc) / 2.0
-      spans = @buffer.token_spans
+      spans = @syntax_highlight ? @buffer.token_spans : nil
       rows = [] of Egui::Galley::Row
+      # Horizontal window of the viewport (columns outside it are
+      # clipped anyway). Runs fully outside it are NOT emitted: a
+      # minified one-line file must not measure and tessellate its
+      # whole 27k-char line every frame — only the viewport-wide
+      # slice, the way professional editors clip long lines to the
+      # horizontal scroll window (VSCode/Sublime render just the
+      # visible columns). Row WIDTH stays the full line's — it feeds
+      # wmax and thus the hscroll extent.
+      vis_l = h_off - char_w * 2.0
+      vis_r = h_off + view_w + char_w * 2.0
       (lv0...k1).each do |li|
         s = rope.line_start(li)
         text = rope.line_text(li)
         runs = [] of Egui::Galley::RowRun
+        # Widths are ACCUMULATED run by run (each fragment measured
+        # once); the old per-run col_x re-measured the whole prefix,
+        # making a long line quadratic — one 27k-char line spent
+        # seconds per frame in col_x.
         if (sp = spans)
           starts, toks = sp
           # First token whose END is past the line start (binary
@@ -461,22 +476,27 @@ module Kodkod
           end
           i = lo
           line_end = s + text.size
+          acc = 0.0
           while i < toks.size && starts[i] < line_end
             tok_s = {starts[i], s}.max
             tok_e = {starts[i + 1], line_end}.min
             if tok_e > tok_s
               frag = text[tok_s - s...tok_e - s]
-              color = Syntax::Palette.color(toks[i].scope, visuals.dark)
-              runs << Egui::Galley::RowRun.new(frag,
-                col_x(text, tok_s - s, fonts, font_size), font_size, color, false)
+              fw = fonts.measure(frag, font_size).x
+              if acc < vis_r && acc + fw >= vis_l
+                color = Syntax::Palette.color(toks[i].scope, visuals.dark)
+                runs << Egui::Galley::RowRun.new(frag,
+                  acc, font_size, color, false)
+              end
+              acc += fw
             end
             i += 1
           end
           runs << Egui::Galley::RowRun.new("", 0.0, font_size, nil, false) if runs.empty?
+          w = acc
         else
-          runs << Egui::Galley::RowRun.new(text, 0.0, font_size, nil, false)
+          runs, w = plain_line_runs(text, fonts, font_size, vis_l, vis_r)
         end
-        w = col_x(text, text.size, fonts, font_size)
         rows << Egui::Galley::Row.new(runs, w, line_h, li.to_f64 * line_h,
           row_ascent, li > 0)
         wmax = {wmax, w}.max
@@ -872,6 +892,40 @@ module Kodkod
       fonts.measure(text[0, {col, text.size}.min], font_size).x
     end
 
+    # Visible runs of an untokenized (plain) line, cut to the
+    # horizontal window [vis_l, vis_r]. One measuring pass in CHUNKS —
+    # each chunk measured once, widths accumulated — so a huge
+    # untokenized file (over HIGHLIGHT_MAX_CHARS) stays O(line) per
+    # frame with only the viewport slice emitted; chunk boundaries are
+    # measured cumulative widths, so a run's x offset is exact (a
+    # chunk may stick past a window edge — the painter clips it).
+    # Chunk edges step to UTF-8 boundaries: a byte mid-character would
+    # measure garbage. Returns {runs, full line width}.
+    private def plain_line_runs(text : String, fonts : Egui::Fonts,
+                                font_size : Float64, vis_l : Float64,
+                                vis_r : Float64) : {Array(Egui::Galley::RowRun), Float64}
+      runs = [] of Egui::Galley::RowRun
+      acc = 0.0
+      c = 0
+      n = text.bytesize
+      while c < n
+        e = {c + 64, n}.min
+        # Snap forward to the next char boundary (continuation bytes
+        # are 10xxxxxx). e == n is always a boundary.
+        while e < n && (text.byte_at(e) & 0xC0) == 0x80
+          e += 1
+        end
+        frag = text.byte_slice(c, e - c)
+        fw = fonts.measure(frag, font_size).x
+        runs << Egui::Galley::RowRun.new(frag, acc, font_size, nil, false) if
+          acc < vis_r && acc + fw >= vis_l
+        acc += fw
+        c = e
+      end
+      runs << Egui::Galley::RowRun.new("", 0.0, font_size, nil, false) if runs.empty?
+      {runs, acc}
+    end
+
     # Nearest caret char offset at a pointer position (screen coords).
     # The column is found against MEASURED cell boundaries (binary
     # search, then snapped to the nearest edge).
@@ -938,9 +992,10 @@ class Egui::Ui
                   rows : Int32 = 25,
                   cursor_style : Symbol = :block,
                   cursor_blinks : Bool = true,
-                  cursor_line : Bool = true) : Egui::Response
+                  cursor_line : Bool = true,
+                  syntax_highlight : Bool = true) : Egui::Response
     add(Kodkod::CodeEditor.new(buffer, focus_id, keyboard,
       escape_clears_focus, tab, rows, cursor_style, cursor_blinks,
-      cursor_line))
+      cursor_line, syntax_highlight))
   end
 end

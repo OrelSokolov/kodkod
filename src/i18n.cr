@@ -83,6 +83,7 @@ module Kodkod
         "settings.hidden"      => "Show hidden files",
         "settings.explorer"    => "Explorer panel",
         "settings.blink"       => "Blinking cursor",
+        "settings.syntax"      => "Syntax highlighting",
         "settings.deeplink"    => "Deep-link with --page root/settings.",
         # explorer panel
         "explorer.no_folder"   => "No folder open.",
@@ -179,6 +180,7 @@ module Kodkod
         "settings.hidden"      => "Показывать скрытые файлы",
         "settings.explorer"    => "Панель проводника",
         "settings.blink"       => "Мигающий курсор",
+        "settings.syntax"      => "Подсветка синтаксиса",
         "settings.deeplink"    => "Прямая ссылка: --page root/settings.",
         # explorer panel
         "explorer.no_folder"   => "Папка не открыта.",
