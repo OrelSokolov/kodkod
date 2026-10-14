@@ -433,6 +433,12 @@ module Kodkod
       k1 = {k1, {lv0 + 1, lines}.min}.max # degenerate zero-height view
 
       # --- build the visible rows (measured runs, no layout pass) ------
+      # Row geometry without a Fonts#layout pass: the ascent (baseline
+      # offset from the row top) mirrors the shard's legacy default —
+      # em box centered on the row center, (height + em) / 2 — so
+      # paint_galley places the glyphs exactly on the row centers.
+      asc, desc = fonts.metrics_at(font_size)
+      row_ascent = (line_h + asc - desc) / 2.0
       spans = @buffer.token_spans
       rows = [] of Egui::Galley::Row
       (lv0...k1).each do |li|
@@ -471,7 +477,8 @@ module Kodkod
           runs << Egui::Galley::RowRun.new(text, 0.0, font_size, nil, false)
         end
         w = col_x(text, text.size, fonts, font_size)
-        rows << Egui::Galley::Row.new(runs, w, line_h, li.to_f64 * line_h, li > 0)
+        rows << Egui::Galley::Row.new(runs, w, line_h, li.to_f64 * line_h,
+          row_ascent, li > 0)
         wmax = {wmax, w}.max
       end
       memory.data.set_f64(wm_id, wmax)

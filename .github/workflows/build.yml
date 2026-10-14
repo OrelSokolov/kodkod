@@ -1,0 +1,233 @@
+name: Build
+
+# Full crosspack pipeline (deps → build → pack) on all three desktops:
+# the Linux deb, the Windows MSI (WiX) and the macOS DMG (.app staged by
+# crosspack, wrapped with hdiutil). Pushing a tag v* publishes a GitHub
+# release with every installer attached; anything else just builds and
+# uploads the workflow artifacts.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CRYSTAL_VERSION: 1.22.0
+  CROSSPACK_VERSION: 0.7.3
+  # WiX v6 is pinned: v7 requires accepting the Open Source Maintenance
+  # Fee EULA (WIX7015) and fails non-interactive CI builds otherwise.
+  WIX_VERSION: 6.0.2
+
+jobs:
+  # One version per workflow run so the binary, the deb, the MSI and the
+  # DMG attached to a release all carry the same version: tags v<x.y.z>
+  # pin it, other runs fall back to the version in crosspack.yml.
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      app_version: ${{ steps.version.outputs.app_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v=$(awk '/^version:/ {print $2}' crosspack.yml)
+          fi
+          echo "app_version=$v" >> "$GITHUB_OUTPUT"
+
+  linux:
+    name: Linux (amd64)
+    runs-on: ubuntu-24.04
+    needs: version
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build & pack (crosspack)
+        # crosspack deps installs crystal (official installer), rake,
+        # imagemagick and the X11/GL headers; `rake artifacts:linux` builds
+        # the release binary into build/bin; pack turns it into the deb.
+        env:
+          APP_VERSION: ${{ needs.version.outputs.app_version }}
+        run: |
+          set -euxo pipefail
+          gem install crosspack -v "$CROSSPACK_VERSION" --no-document
+
+          crosspack deps ubuntu-24.04
+          shards install
+          crystal spec
+
+          crosspack build ubuntu-24.04 --version "$APP_VERSION"
+          crosspack pack ubuntu-24.04
+          crosspack pack ubuntu-25.10
+
+          tar -czf "kodkod-$APP_VERSION-linux-amd64.tar.gz" -C build/bin .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kodkod-linux-amd64
+          path: |
+            kodkod-*-linux-amd64.tar.gz
+            crosspacks/ubuntu/**/*.deb
+          if-no-files-found: error
+
+  windows:
+    name: Windows (amd64)
+    runs-on: windows-latest
+    needs: version
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Crystal's Windows target is MSVC: the official zip + the VS Build
+      # Tools preinstalled on the runner. The PATH lines below apply to
+      # every subsequent step.
+      - name: Install Crystal
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\crystal.zip"
+          $url = "https://github.com/crystal-lang/crystal/releases/download/$env:CRYSTAL_VERSION/crystal-$env:CRYSTAL_VERSION-windows-x86_64-msvc-unsupported.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\crystal" -Force
+          $bin = (Get-ChildItem "$env:RUNNER_TEMP\crystal" -Recurse -Filter crystal.exe |
+            Select-Object -First 1).DirectoryName
+          Add-Content $env:GITHUB_PATH $bin
+
+      # winget installs machine-wide but the runner env keeps a stale PATH,
+      # so re-export the ImageMagick dir through GITHUB_PATH.
+      - name: Install ImageMagick
+        shell: pwsh
+        run: |
+          winget install --id ImageMagick.ImageMagick -e `
+            --accept-source-agreements --accept-package-agreements
+          $im = (Get-ChildItem "C:\Program Files\ImageMagick-*" -Directory |
+            Select-Object -First 1).FullName
+          Add-Content $env:GITHUB_PATH $im
+
+      # WiX (the .NET tool) builds the MSI; Ruby is preinstalled on
+      # windows runners, so crosspack comes from gem.
+      - name: Install WiX + crosspack
+        shell: pwsh
+        run: |
+          dotnet tool install -g wix --version "$env:WIX_VERSION"
+          Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.dotnet\tools"
+          gem install crosspack -v "$env:CROSSPACK_VERSION" --no-document
+
+      - name: Build & pack MSI (crosspack + WiX)
+        # Everything MSVC (cl.exe for the sokol shim, link.exe for the
+        # final binary) must run inside the vcvars64 environment; the
+        # deps stage re-verifies crystal/magick installed above.
+        shell: cmd
+        env:
+          APP_VERSION: ${{ needs.version.outputs.app_version }}
+        run: |
+          for /f "usebackq delims=" %%i in (`""%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"`) do set "VSPATH=%%i"
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" x64
+
+          shards install
+          crosspack build windows-11 --version "%APP_VERSION%"
+          crosspack pack windows-11
+
+      - name: Package zip
+        shell: pwsh
+        run: Compress-Archive -Path build/bin/kodkod.exe -DestinationPath "kodkod-$env:APP_VERSION-windows-amd64.zip"
+        env:
+          APP_VERSION: ${{ needs.version.outputs.app_version }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kodkod-windows-amd64
+          path: |
+            kodkod-*-windows-amd64.zip
+            crosspacks/windows/**/*.msi
+          if-no-files-found: error
+
+  macos:
+    name: macOS (arm64)
+    runs-on: macos-latest
+    needs: version
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build & pack (crosspack)
+        # crosspack deps brew-installs crystal + imagemagick; pack stages
+        # the .app bundle (crosspacks/macos/<version>/<arch>/kodkod.app).
+        env:
+          APP_VERSION: ${{ needs.version.outputs.app_version }}
+        run: |
+          set -euxo pipefail
+          gem install crosspack -v "$CROSSPACK_VERSION" --no-document
+
+          crosspack deps macos
+          shards install
+
+          crosspack build macos --version "$APP_VERSION"
+          crosspack pack macos
+
+      # DMG layout mirrors hvoice: the .app next to an /Applications
+      # symlink for drag-and-drop install. ditto keeps the bundle's
+      # permissions intact in the zip.
+      - name: Package DMG + zip
+        env:
+          APP_VERSION: ${{ needs.version.outputs.app_version }}
+        run: |
+          set -euxo pipefail
+          app=$(find crosspacks/macos -name '*.app' -type d | head -1)
+          stage="$(mktemp -d)/dmg"
+          mkdir -p "$stage"
+          cp -R "$app" "$stage/"
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -volname kodkod -srcfolder "$stage" -ov -format UDZO \
+            "kodkod-$APP_VERSION-macos-arm64.dmg"
+          ditto -c -k --keepParent "$app" "kodkod-$APP_VERSION-macos-arm64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kodkod-macos-arm64
+          path: |
+            kodkod-*-macos-arm64.dmg
+            kodkod-*-macos-arm64.zip
+          if-no-files-found: error
+
+  # Publishes ready-made installers (Ubuntu deb, Windows MSI, macOS DMG —
+  # plus portable archives) whenever a v* tag is pushed.
+  release:
+    name: Release installers
+    needs: [version, linux, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Attach installers to a GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ needs.version.outputs.app_version }}
+        run: |
+          set -euxo pipefail
+          tag="$GITHUB_REF_NAME"
+          assets=$(find dist -type f \( -name '*.deb' -o -name '*.msi' -o -name '*.dmg' \
+            -o -name '*.zip' -o -name '*.tar.gz' \))
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" $assets --clobber
+          else
+            gh release create "$tag" $assets --generate-notes \
+              --title "kodkod $APP_VERSION"
+          fi

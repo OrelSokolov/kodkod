@@ -3,10 +3,11 @@ require "../src/fuzzy"
 require "../src/quick_open"
 require "../src/app"
 
-# Exposes the private settings/vim state for the flicker assertions.
+# Exposes the private settings/vim/i18n state for the flicker assertions.
 class SettingsTestApp < KodkodApp
   def settings; @settings; end
   def vim; @vim; end
+  def i18n; @i18n; end
 end
 
 SSCREEN = Egui::Rect.from_min_size(Egui::Pos2.zero,
@@ -47,6 +48,9 @@ describe "settings page" do
 
   it "toggles VIM mode on a real click at the label" do
     app = SettingsTestApp.new([] of String)
+    # Settings come from the developer's persisted AppConfig — pin the
+    # locale so the label below is found whatever the machine saved.
+    app.i18n.locale = "en"
     ctx = Egui::Context.new
     3.times { |i| settings_frame(app, ctx, time: 0.016 * (i + 1)) }
     ctx.router.navigate("root/settings")

@@ -1,10 +1,11 @@
 require "fileutils"
 require "etc"
 
-# kodkod builds on top of egui-cr as a (path) shard dependency. The
+# kodkod builds on top of egui-cr as a (github) shard dependency. The
 # native static library (sokol_app/gfx/gl + fontstash + nanosvg + pty
-# shims) lives in the egui.cr checkout — build it there if missing.
-EGUI_DIR = File.expand_path(ENV.fetch("EGUI_DIR", File.expand_path("../egui.cr", __dir__)))
+# shims) lives in the egui.cr checkout installed by shards — build it
+# there if missing.
+EGUI_DIR = File.expand_path(ENV.fetch("EGUI_DIR", File.expand_path("lib/egui-cr", __dir__)))
 WINDOWS  = Gem.win_platform?
 DARWIN   = RUBY_PLATFORM.include?("darwin")
 NATIVE_LIB = WINDOWS ? "lib/egui_cr_sokol.lib" : "lib/libegui_cr_sokol.a"

@@ -31,6 +31,30 @@ OPT=-O3 rake build:dev  # middle ground: optimized, no full release
 The native egui-cr static library is built automatically on first
 build (or set `EGUI_DIR` if egui.cr lives elsewhere).
 
+## Packaging (crosspack)
+
+Releases are built and packed by the
+[crosspack](https://rubygems.org/gems/crosspack) gem (see `Gemfile`
+and `crosspack.yml`; the matrix covers Linux, Windows and macOS —
+native builds on each host):
+
+```sh
+bundle install                      # once
+bundle exec crosspack deps ubuntu-25.10   # verify host build deps
+bundle exec crosspack build ubuntu-25.10  # rake icons + release build
+bundle exec crosspack pack ubuntu-25.10   # → crosspacks/ubuntu/25.10/amd64/kodkod_0.1.0_amd64.deb
+sudo apt install ./crosspacks/ubuntu/25.10/amd64/kodkod_0.1.0_amd64.deb
+```
+
+The deb installs `/usr/local/bin/kodkod`, a `.desktop` entry and the
+icon (`build/appicon.png`, regenerated from `assets/kodkod.svg` by
+`rake icons`).
+
+CI (`.github/workflows/build.yml`) runs the same pipeline on all three
+desktops: pushing a `v*` tag publishes a GitHub release with the
+Ubuntu deb, the Windows MSI (WiX), the macOS DMG and portable
+archives; other builds upload the same files as workflow artifacts.
+
 ## Keyboard
 
 | Keys | Action |

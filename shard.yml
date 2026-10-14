@@ -11,8 +11,9 @@ authors:
 
 dependencies:
   egui-cr:
-    path: ../egui.cr
+    github: OrelSokolov/egui.cr
+    commit: 6bb313ded654186d313972bde232a41309fe48dc
   highlight_cr:
-    path: ../myshards/highlight.cr
+    github: OrelSokolov/highlight.cr
 
 license: MIT

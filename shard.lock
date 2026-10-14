@@ -1,18 +1,22 @@
 version: 2.0
 shards:
+  brotli:
+    git: https://github.com/orelsokolov/brotli.cr.git
+    version: 0.2.0
+
   egui-cr:
-    path: ../egui.cr
-    version: 0.1.0
+    git: https://github.com/orelsokolov/egui.cr.git
+    version: 0.2.0+git.commit.6bb313ded654186d313972bde232a41309fe48dc
 
   freetype-cr:
     git: https://github.com/orelsokolov/freetype.cr.git
-    version: 1.0.0
+    version: 1.1.0
 
   highlight_cr:
-    path: ../myshards/highlight.cr
-    version: 0.1.0
+    git: https://github.com/orelsokolov/highlight.cr.git
+    version: 0.1.0+git.commit.4016f6af906238302ac6abb46b23e87e4287e144
 
   nanosvg:
     git: https://github.com/orelsokolov/nanosvg.cr.git
-    version: 1.0.0+git.commit.74a8f9f1ecdb0cf382b439f27b4cd73ecf5f7bfa
+    version: 1.1.0
 
