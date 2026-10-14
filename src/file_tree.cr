@@ -4,10 +4,10 @@
 # directory tree wants the opposite — rows COME from the filesystem,
 # read only when a node is first expanded (a repo with 10k files must
 # not stat anything until asked). Directory listings are cached per
-# path. Refresh is event-driven where the platform offers it (Linux:
-# inotify — see `watch`; an external touch shows up next frame) with
-# the RECHECK mtime poll as the backstop, and poll-only elsewhere.
-# F5/`refresh` drops everything wholesale.
+# path. Refresh is event-driven through the fswatch.cr shard (its
+# backends: inotify on Linux, kqueue on macOS/BSD, polling elsewhere)
+# — an external touch shows up next frame — with the RECHECK mtime
+# poll as the backstop. F5/`refresh` drops the cache wholesale.
 #
 # Expand state lives in Memory#data keyed by the entry's absolute path
 # id — surviving frames like TreeView, no app-held state. Rows carry
@@ -30,19 +30,7 @@
 # scrolled into view after the arrows walk it off-screen.
 
 require "egui-cr/egui"
-
-{% if flag?(:linux) %}
-  # Linux: listing invalidation rides on real filesystem events. The
-  # libc wrappers (glibc/musl both ship them) are enough — no shard,
-  # no C shim. See FileTree.watch below.
-  @[Link("c")]
-  lib LibInotify
-    fun init1 = inotify_init1(flags : Int32) : Int32
-    fun add_watch = inotify_add_watch(fd : Int32, pathname : UInt8*,
-                                      mask : UInt32) : Int32
-    fun rm_watch = inotify_rm_watch(fd : Int32, wd : Int32) : Int32
-  end
-{% end %}
+require "fswatch"
 
 module Kodkod
   class FileTree
@@ -78,7 +66,6 @@ module Kodkod
 
     def self.refresh : Nil
       @@listings.clear
-      drop_watches
     end
 
     def self.listing(dir : String) : Array(Entry)
@@ -97,142 +84,54 @@ module Kodkod
         {e.dir ? 0 : 1, e.name.downcase}
       end
       @@listings[dir] = Listing.new(mtime, entries)
-      watch(dir)
       entries
     end
 
     # --- filesystem events -----------------------------------------
     #
-    # Linux delivers directory changes through inotify: every
-    # directory that gets a cached listing is watched, and the reader
-    # fiber below drops the cached entry the moment the kernel
-    # reports a change — the next frame's walk re-lists it, so an
-    # external touch (git checkout, mkdir, another editor) shows up
-    # immediately, not at the next RECHECK poll. The delivery is the
-    # PTY-reader pattern (backend/pty.cr): the fd goes through an
-    # EVENTED IO::FileDescriptor (epoll), the fiber suspends in read
-    # instead of blocking its worker thread, and the on_change
-    # doorbell (Context#request_repaint → Runtime.wake, installed by
-    # `ui`) wakes the detached render loop between frames.
+    # Directory changes arrive through the fswatch.cr shard: ONE
+    # recursive watch on the workspace root; an event drops the
+    # affected cached listings and wakes the UI through the repaint
+    # doorbell installed by `ui`. The RECHECK mtime poll above stays
+    # as the backstop (watch-table limits, event-queue overflow,
+    # symlinked directories the shard watches as leaves).
     #
-    # Other platforms keep the RECHECK poll — FSEvents (macOS) or
-    # ReadDirectoryChangesW (Windows) can slot into the same
-    # watch/drop_watches pair later.
-    {% if flag?(:linux) %}
-      # Only the masks used here. WATCH_MASK omits IN_MODIFY and
-      # IN_ATTRIB on purpose: a file's content/metadata never changes
-      # its directory's LISTING (only create/delete/move do, and each
-      # of those bumps the directory mtime anyway).
-      IN_CREATE      = 0x100_u32
-      IN_MOVED_FROM  =  0x40_u32
-      IN_MOVED_TO    =  0x80_u32
-      IN_DELETE      = 0x200_u32
-      IN_DELETE_SELF = 0x400_u32
-      IN_MOVE_SELF   = 0x800_u32
-      IN_Q_OVERFLOW  = 0x4000_u32
-      IN_IGNORED     = 0x8000_u32
-      WATCH_MASK = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
-                   IN_DELETE_SELF | IN_MOVE_SELF
-      IN_NONBLOCK = 0o4000
-      IN_CLOEXEC  = 0o2000000
+    # The handler runs on the shard's observation fiber; cache drops
+    # are safe because the scheduler is cooperative (no yield inside
+    # Hash#delete) and the walk only ever holds the entries Array,
+    # never the Hash.
+    @@fs_watch : FSWatch::Watch? = nil
+    @@fs_root : String? = nil
+    @@repaint : Proc(Nil)? = nil
 
-      @@watch_fd = -1
-      @@watch_io : IO::FileDescriptor? = nil
-      @@wd_paths = {} of Int32 => String
-      @@path_wds = {} of String => Int32
-      # Repaint doorbell, re-installed by `ui` every frame.
-      @@on_change : Proc(Nil)? = nil
+    # The fs-event doorbell, re-anchored by `ui` every frame.
+    def self.repaint=(cb : Proc(Nil)) : Nil
+      @@repaint = cb
+    end
 
-      def self.on_change=(cb : Proc(Nil)) : Nil
-        @@on_change = cb
-      end
+    # (Re)start the root watch when the workspace folder changes. The
+    # recursive watch covers directories as they appear, so nothing
+    # registers per listing (unlike the old per-directory inotify
+    # scheme this replaces).
+    def self.ensure_watch(root : String) : Nil
+      return if @@fs_root == root && @@fs_watch
+      @@fs_watch.try(&.stop)
+      @@fs_root = root
+      @@fs_watch = FSWatch.watch(root) { |event| on_fs_event(event) }
+    end
 
-      # Idempotent watch registration for an expanded directory.
-      # Silent on failure (permissions, watch-table full) — the
-      # RECHECK poll stays the backstop. A renamed ANCESTOR leaves a
-      # stale wd→path entry behind until the next refresh; harmless
-      # (it can only invalidate a path nothing reads) and bounded by
-      # the number of directories ever expanded.
-      def self.watch(path : String) : Nil
-        return if @@path_wds.has_key?(path)
-        if @@watch_fd < 0
-          fd = LibInotify.init1(IN_NONBLOCK | IN_CLOEXEC)
-          return if fd < 0
-          @@watch_fd = fd
-          io = IO::FileDescriptor.new(fd)
-          # The constructor's type probe doesn't know inotify fds (an
-          # anon inode is neither pipe nor socket) so it assumes
-          # blocking — and CLEARS the fd's O_NONBLOCK, which would
-          # wedge the whole scheduler thread in read. Re-arm it: the
-          # evented read then suspends the fiber on EAGAIN (epoll),
-          # the PTY-reader pattern.
-          IO::FileDescriptor.set_blocking(fd, false)
-          @@watch_io = io
-          spawn reader_loop(io), name: "kodkod-fs-watch"
-          # Let the reader reach its first (evented, suspending) read
-          # before this frame goes on — the PTY spawn trick.
-          Fiber.yield
-        end
-        wd = LibInotify.add_watch(@@watch_fd, path, WATCH_MASK)
-        return if wd < 0
-        @@wd_paths[wd] = path
-        @@path_wds[path] = wd
+    private def self.on_fs_event(event : FSWatch::Event) : Nil
+      if event.overflow?
+        @@listings.clear # events were dropped — reload the world
+      else
+        # The subject's own listing (directory events) and its
+        # parent's (where the tree shows the change).
+        @@listings.delete(event.path)
+        @@listings.delete(File.dirname(event.path))
       end
+      @@repaint.try &.call # wake the loop for a fresh walk
+    end
 
-      # F5/refresh: the listings come back through `listing` (which
-      # re-registers watches); IN_IGNORED events for the removed
-      # watches are no-ops (the maps are already empty).
-      def self.drop_watches : Nil
-        @@path_wds.each_value { |wd| LibInotify.rm_watch(@@watch_fd, wd) }
-        @@wd_paths.clear
-        @@path_wds.clear
-      end
-
-      # Decode inotify_event records off the fd until it dies. Runs
-      # OUTSIDE the frame fiber: cache drops are safe because the
-      # scheduler is cooperative (no yield inside Hash#delete) and
-      # the walk only ever holds the entries Array, never the Hash.
-      private def self.reader_loop(io : IO::FileDescriptor) : Nil
-        header = Bytes.new(16)
-        loop do
-          break unless io.read_fully?(header)
-          wd = IO::ByteFormat::SystemEndian.decode(Int32, header[0, 4])
-          mask = IO::ByteFormat::SystemEndian.decode(UInt32, header[4, 4])
-          len = IO::ByteFormat::SystemEndian.decode(UInt32,
-            header[12, 4]).to_i
-          break unless io.read_fully?(Bytes.new(len)) # name slot, unread
-          if mask & IN_Q_OVERFLOW != 0
-            @@listings.clear # kernel dropped events — reload the world
-            @@on_change.try &.call
-          end
-          next unless (path = @@wd_paths[wd]?)
-          if mask & IN_IGNORED != 0
-            @@path_wds.delete(path) # watch removed (rm_watch / dir gone)
-            @@wd_paths.delete(wd)
-          elsif (mask & WATCH_MASK) != 0 && @@listings.delete(path)
-            @@on_change.try &.call # wake the loop for a fresh walk
-          end
-        end
-      rescue ex : IO::Error
-        # fd closed or unreadable — the RECHECK poll takes over.
-      ensure
-        @@watch_fd = -1
-        @@watch_io = nil
-        @@wd_paths.clear
-        @@path_wds.clear
-      end
-    {% else %}
-      # No filesystem events on this platform (yet): the RECHECK poll
-      # is the refresh path.
-      def self.watch(path : String) : Nil
-      end
-
-      def self.drop_watches : Nil
-      end
-
-      def self.on_change=(cb : Proc(Nil)) : Nil
-      end
-    {% end %}
 
     # Extension → lucide icon name. Everything missing from the map
     # falls back to the plain `file` icon.
@@ -275,12 +174,13 @@ module Kodkod
            show_hidden : Bool = false, chevrons : Bool = true,
            &on_activate : String ->) : Nil
       memory = ui.ctx.memory
-      # The fs-event doorbell, re-anchored every frame: inotify
-      # invalidations land BETWEEN frames (reader fiber — see watch),
-      # where request_repaint must also wake the backend loop
+      # The fs-event doorbell, re-anchored every frame: fswatch
+      # invalidations land BETWEEN frames (the shard's observation
+      # fiber), where request_repaint must also wake the backend loop
       # (Egui::Runtime.wake) or the fresh listing would wait for the
       # next unrelated repaint.
-      FileTree.on_change = ->{ ui.ctx.request_repaint }
+      FileTree.repaint = ->{ ui.ctx.request_repaint }
+      FileTree.ensure_watch(root)
       base = Egui::Id.from("kodkod/file_tree/#{@id}")
       @on_activate = on_activate
       @last_touched_id = lt_id = base.child(Egui::Id.from("last_touched").value)

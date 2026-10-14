@@ -12,6 +12,10 @@ shards:
     git: https://github.com/orelsokolov/freetype.cr.git
     version: 1.1.0
 
+  fswatch:
+    git: https://github.com/orelsokolov/fswatch.cr.git
+    version: 0.1.0+git.commit.2eff6393f2d67615c970b57b8c1a1e4604b7d6c7
+
   highlight_cr:
     git: https://github.com/orelsokolov/highlight.cr.git
     version: 0.1.0+git.commit.83829b493c40482acc65ff8fa77c22bc7a72cbc1

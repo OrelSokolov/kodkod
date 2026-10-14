@@ -15,5 +15,7 @@ dependencies:
     commit: 6bb313ded654186d313972bde232a41309fe48dc
   highlight_cr:
     github: OrelSokolov/highlight.cr
+  fswatch:
+    github: OrelSokolov/fswatch.cr
 
 license: MIT

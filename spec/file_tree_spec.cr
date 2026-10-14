@@ -65,19 +65,30 @@ describe Kodkod::FileTree do
   end
 
   {% if flag?(:linux) %}
-    it "refreshes listings from inotify events without waiting for RECHECK" do
+    it "refreshes listings from fs events without waiting for RECHECK" do
+      ctx = Egui::Context.new
       with_temp_dir do |dir|
         Kodkod::FileTree.refresh
         File.touch(File.join(dir, "a.txt"))
-        Kodkod::FileTree.listing(dir) # populates the cache + the watch
+        # One rendered frame arms the recursive FSWatch on the root
+        # (ensure_watch in `ui`); the cache entry follows.
+        ctx.begin_frame(Egui::RawInput.new(
+          Egui::Rect.from_min_size(Egui::Pos2.zero,
+            Egui::Vec2.new(300.0, 600.0))))
+        ctx.central_panel do |ui|
+          ui.file_tree("fs-events", dir) { |_path| }
+        end
+        ctx.end_frame
+        Kodkod::FileTree.listing(dir)
 
-        # The event lands asynchronously (reader fiber); poll WELL
-        # under RECHECK — the point is that no poll wait is needed.
+        # The event lands asynchronously (the shard's observation
+        # fiber); poll WELL under RECHECK — the point is that no poll
+        # wait is needed.
         File.touch(File.join(dir, "b.txt"))
         deadline = Time.instant + 2.seconds
         until Kodkod::FileTree.listing(dir).map(&.name).size == 2
           sleep 0.02.seconds
-          raise "inotify event never arrived" if Time.instant > deadline
+          raise "fs event never arrived" if Time.instant > deadline
         end
         Kodkod::FileTree.listing(dir).map(&.name)
           .should eq(["a.txt", "b.txt"])
@@ -86,7 +97,7 @@ describe Kodkod::FileTree do
         File.delete(File.join(dir, "a.txt"))
         until Kodkod::FileTree.listing(dir).map(&.name).size == 1
           sleep 0.02.seconds
-          raise "inotify delete event never arrived" if Time.instant > deadline
+          raise "fs delete event never arrived" if Time.instant > deadline
         end
       end
     end
