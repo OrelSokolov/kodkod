@@ -32,6 +32,20 @@ describe Kodkod::CodeEditor do
     b.text.should eq("line one\nline two\n")
   end
 
+  it "seats gutter numbers on the row's text geometry, not the row center" do
+    # Same regression class as the caret: the galley baseline seats the
+    # em box below the row center, so the digits must anchor on the
+    # row's text geometry to line up with the glyphs (a row-center y
+    # reads a couple pixels high).
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("line one\nline two\n")
+    editor_frame(ctx, b)
+    cmds = ctx.painter.commands.select(Egui::TextCmd)
+    digit = cmds.find { |t| t.text == "1" }.not_nil!
+    text = cmds.find { |t| t.text.includes?("line one") }.not_nil!
+    digit.pos.y.should eq(text.pos.y)
+  end
+
   it "types text into the focused editor" do
     ctx = Egui::Context.new
     b = Kodkod::EditorBuffer.new("")

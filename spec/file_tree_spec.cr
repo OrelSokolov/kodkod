@@ -52,8 +52,9 @@ describe Kodkod::FileTree do
       first = Kodkod::FileTree.listing(dir)
       first.same?(Kodkod::FileTree.listing(dir)).should be_true
 
-      # mtime granularity: force a change the cache can see.
-      sleep 0.01
+      # mtime granularity + the RECHECK throttle: wait past both, then
+      # force a change the cache can see.
+      sleep Kodkod::FileTree::RECHECK + 0.02.seconds
       File.touch(File.join(dir, "b.txt"))
       Kodkod::FileTree.listing(dir).map(&.name)
         .should eq(["a.txt", "b.txt"])
@@ -62,6 +63,34 @@ describe Kodkod::FileTree do
       Kodkod::FileTree.listing(dir).same?(first).should be_false
     end
   end
+
+  {% if flag?(:linux) %}
+    it "refreshes listings from inotify events without waiting for RECHECK" do
+      with_temp_dir do |dir|
+        Kodkod::FileTree.refresh
+        File.touch(File.join(dir, "a.txt"))
+        Kodkod::FileTree.listing(dir) # populates the cache + the watch
+
+        # The event lands asynchronously (reader fiber); poll WELL
+        # under RECHECK — the point is that no poll wait is needed.
+        File.touch(File.join(dir, "b.txt"))
+        deadline = Time.instant + 2.seconds
+        until Kodkod::FileTree.listing(dir).map(&.name).size == 2
+          sleep 0.02.seconds
+          raise "inotify event never arrived" if Time.instant > deadline
+        end
+        Kodkod::FileTree.listing(dir).map(&.name)
+          .should eq(["a.txt", "b.txt"])
+
+        # Deletions invalidate too.
+        File.delete(File.join(dir, "a.txt"))
+        until Kodkod::FileTree.listing(dir).map(&.name).size == 1
+          sleep 0.02.seconds
+          raise "inotify delete event never arrived" if Time.instant > deadline
+        end
+      end
+    end
+  {% end %}
 
   it "renders a frame with an expanded root without raising" do
     ctx = Egui::Context.new

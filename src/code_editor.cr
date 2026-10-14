@@ -637,10 +637,14 @@ module Kodkod
 
       painter.clip = outer_clip
 
-      # Gutter numbers (center-y text positions like TreeView rows).
+      # Gutter numbers. Anchored on the row's TEXT geometry like the
+      # caret above: the galley baseline seats the em box |desc| below
+      # the row center, so a plain row-center y reads a couple pixels
+      # higher than the line's glyphs.
       num_color = visuals.fade_color(visuals.text_color, 0.5)
       (lv0...k1).each do |li|
-        y = rect.top + li.to_f64 * line_h - v_off + line_h / 2.0
+        y = rect.top + li.to_f64 * line_h - v_off +
+            row_ascent - (asc + desc) / 2.0
         next if y < rect.top - line_h || y > rect.bottom + line_h
         label = (li + 1).to_s
         x = gutter_rect.right - GUTTER_PAD - fonts.measure(label, font_size).x
