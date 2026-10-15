@@ -314,7 +314,10 @@ module Kodkod
       h_off = memory.data.get_vec2(scroll_id, Egui::Vec2.zero).x
       if memory.active_scroll_area? == scroll_id && !input.scroll.y.zero?
         if input.modifiers.shift
-          h_off -= input.scroll.y * char_w * 3.0
+          # scroll.y < 0 is wheel-up; +scroll.y → view-right, so
+          # wheel-up must DECREASE h_off (browser/GTK/ScrollArea
+          # convention: shift+wheel-up scrolls toward column 0).
+          h_off += input.scroll.y * char_w * 3.0
           kin.takeover
         else
           kin.input(input.scroll.y * style.scroll_speed, input.time,
@@ -322,6 +325,15 @@ module Kodkod
         end
       else
         kin.glide(input.dt, max_offset, ui.ctx)
+      end
+      # Touchpad horizontal / tilt wheel (scroll.x — X11 buttons 6/7,
+      # Wayland axis): a positive notch means view-LEFT (sokol
+      # convention, same direction family as shift+wheel-up). Runs
+      # alongside the vertical branch — a diagonal swipe drives both
+      # axes, and a horizontal-only swipe leaves any vertical glide
+      # running untouched.
+      if memory.active_scroll_area? == scroll_id && !input.scroll.x.zero?
+        h_off -= input.scroll.x * char_w * 3.0
       end
       # VIM-like topline: an over-scroll past max_offset (content just
       # shrank — dd at the file end) is allowed to STAY — clamping here
