@@ -43,31 +43,49 @@ class KodkodApp < Egui::App
   THEMES = ["Dark", "Light"]
 
   # Extension → syntax registry name (Syntax.highlight key). Files
-  # outside the map open plain — no highlighting. The languages come
-  # from the highlight.cr common set, plus the local Crystal grammar.
+  # outside the map fall through to LANG_BY_NAME below.
   LANG_BY_EXT = {
     ".cr"  => "crystal", ".rb" => "ruby",
+    ".rake" => "ruby", ".ru" => "ruby", ".gemspec" => "ruby",
+    ".erb" => "erb",
     ".c"   => "c", ".h" => "c",
     ".cpp" => "cpp", ".hpp" => "cpp", ".cc" => "cpp",
+    ".hh"  => "cpp", ".cxx" => "cpp", ".hxx" => "cpp",
     ".cs"  => "csharp",
     ".css" => "css", ".scss" => "scss", ".less" => "less",
     ".diff" => "diff", ".patch" => "diff",
     ".go"  => "go", ".graphql" => "graphql", ".gql" => "graphql",
     ".ini" => "ini", ".toml" => "ini",
     ".java" => "java", ".kt" => "kotlin", ".kts" => "kotlin",
-    ".lua" => "lua", ".m" => "objectivec",
+    ".lua" => "lua", ".m" => "objectivec", ".mm" => "objectivec",
     ".pl"  => "perl", ".pm" => "perl",
-    ".php" => "php",
-    ".py"  => "python", ".r" => "r", ".rs" => "rust",
+    ".php" => "php", ".phtml" => "php-template",
+    ".py"  => "python", ".pyi" => "python",
+    ".r"   => "r", ".rs" => "rust",
     ".sql" => "sql", ".swift" => "swift", ".vb" => "vbnet",
     ".ts"  => "typescript", ".mts" => "typescript",
     ".wat" => "wasm",
     ".xml" => "xml", ".html" => "xml", ".htm" => "xml", ".svg" => "xml",
+    ".xhtml" => "xml", ".xsl" => "xml", ".xsd" => "xml",
+    ".rss" => "xml", ".atom" => "xml",
     ".json" => "json",
     ".yml" => "yaml", ".yaml" => "yaml",
-    ".md"  => "markdown", ".markdown" => "markdown",
+    ".md"  => "markdown", ".markdown" => "markdown", ".mkd" => "markdown",
+    ".mk"  => "makefile", ".mak" => "makefile",
     ".sh"  => "bash", ".bash" => "bash", ".zsh" => "bash",
     ".js"  => "javascript", ".mjs" => "javascript",
+    ".cjs" => "javascript",
+  }
+
+  # Well-known extensionless filenames → syntax registry name. Matched
+  # case-insensitively on the basename after LANG_BY_EXT misses.
+  LANG_BY_NAME = {
+    "makefile"     => "makefile",
+    "gnumakefile"  => "makefile",
+    "bsdmakefile"  => "makefile",
+    "rakefile"     => "ruby",
+    "gemfile"      => "ruby",
+    "vagrantfile"  => "ruby",
   }
 
   TEXT_MIME_EXTRAS = {"application/json", "application/xml",
@@ -611,7 +629,8 @@ class KodkodApp < Egui::App
   end
 
   private def lang_for(path : String) : String?
-    LANG_BY_EXT[File.extname(path).downcase]?
+    LANG_BY_EXT[File.extname(path).downcase]? ||
+      LANG_BY_NAME[File.basename(path).downcase]?
   end
 
   # The About modal (a routed page — see Kodkod::About).
