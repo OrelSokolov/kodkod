@@ -121,6 +121,38 @@ module Kodkod
                               focus_id : String) : Bool
       input = ctx.input
 
+      # A selection in normal mode is MOUSE-made (the widget keyboard
+      # — shift+arrows — is off here, and every motion collapses the
+      # anchor). The standard-editor keys then honor the drag
+      # directly, like gvim's clipboard behavior for mouse
+      # selections: Ctrl+C/X/V and Delete/Backspace operate on it.
+      if (sel = CodeEditor.selection(ctx, focus_id))
+        if input.modifiers.ctrl && input.consume_key(Egui::KeyCode::C)
+          Egui::SystemPorts::Clipboard.text =
+            buffer.rope.slice(sel[0], sel[1] - sel[0])
+          return true
+        end
+        if input.modifiers.ctrl && input.consume_key(Egui::KeyCode::X)
+          Egui::SystemPorts::Clipboard.text =
+            buffer.rope.slice(sel[0], sel[1] - sel[0])
+          CodeEditor.delete_chars(ctx, buffer, focus_id,
+            sel[0], sel[1] - sel[0])
+          return true
+        end
+        if input.modifiers.ctrl && input.consume_key(Egui::KeyCode::V) &&
+           (paste = Egui::SystemPorts::Clipboard.text)
+          CodeEditor.replace_range(ctx, buffer, focus_id,
+            sel[0], sel[1] - sel[0], paste.gsub(/\r\n|\r/, "\n"))
+          return true
+        end
+        if input.consume_key(Egui::KeyCode::Delete) ||
+           (!input.modifiers.ctrl && input.consume_key(Egui::KeyCode::Backspace))
+          CodeEditor.delete_chars(ctx, buffer, focus_id,
+            sel[0], sel[1] - sel[0])
+          return true
+        end
+      end
+
       # Ctrl combos: only Ctrl-d/u (half page) are ours; the rest
       # (Ctrl+s, Ctrl+o, …) belong to the app's hotkeys.
       if input.modifiers.ctrl
@@ -326,6 +358,21 @@ module Kodkod
       if input.consume_key(Egui::KeyCode::Escape)
         exit_visual(ctx, buffer, focus_id)
         return true
+      end
+
+      # The standard-editor reflexes on the visual selection:
+      # Ctrl+C yanks, Ctrl+X cuts (vim's own y/d stay as they are).
+      if input.modifiers.ctrl
+        if input.consume_key(Egui::KeyCode::C)
+          visual_yank(ctx, buffer, focus_id)
+          exit_visual(ctx, buffer, focus_id)
+          return true
+        end
+        if input.consume_key(Egui::KeyCode::X)
+          visual_delete(ctx, buffer, focus_id)
+          exit_visual(ctx, buffer, focus_id)
+          return true
+        end
       end
 
       acted = false

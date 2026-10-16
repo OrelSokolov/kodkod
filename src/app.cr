@@ -390,7 +390,14 @@ class KodkodApp < Egui::App
                 cursor_line: !@vim.enabled?,
                 # Off = render plain (no tokenization/measured token
                 # runs) — the long-line/minified-file escape hatch.
-                syntax_highlight: @settings.syntax_highlight)
+                syntax_highlight: @settings.syntax_highlight,
+                on_context_menu: ->(menu : Egui::Ui) {
+                  # A distinct local (a captured `buffer` widens to
+                  # the nilable re-binding further down this method).
+                  buf = active.buffer?.not_nil!
+                  editor_context_menu(ctx, buf,
+                    active.focus_id.not_nil!, menu)
+                })
             end
 
             # ACTIVE TAB = ACTIVE EDITOR, reactively (see notepad).
@@ -780,6 +787,43 @@ class KodkodApp < Egui::App
         Egui::SystemPorts::Clipboard.text = path
         @status = t("status.copied_path", path: path)
       }
+    end
+  end
+
+  # The right-click editor menu: clipboard rows + Select All through
+  # the class-level API, so they apply in EVERY VIM mode — in
+  # normal/visual the widget keyboard is off and the menu (with the
+  # Ctrl+C/X/V handling in VimMode) is the mouse-selection's copy
+  # path. Rows that cannot apply (no selection / empty clipboard /
+  # empty buffer) are grayed out.
+  private def editor_context_menu(ctx : Egui::Context,
+                                  buffer : Kodkod::EditorBuffer,
+                                  fid : String, menu : Egui::Ui) : Nil
+    menu.enabled(!Kodkod::CodeEditor.selection(ctx, fid).nil?) do |m|
+      m.menu_item(t("edit.cut"), hotkey: "Ctrl+X") do
+        if (s = Kodkod::CodeEditor.selection(ctx, fid))
+          Egui::SystemPorts::Clipboard.text =
+            buffer.rope.slice(s[0], s[1] - s[0])
+          Kodkod::CodeEditor.delete_chars(ctx, buffer, fid, s[0], s[1] - s[0])
+        end
+      end
+      m.menu_item(t("edit.copy"), icon: :copy, hotkey: "Ctrl+C") do
+        Egui::SystemPorts::Clipboard.text =
+          Kodkod::CodeEditor.selection_text(ctx, buffer, fid)
+      end
+    end
+    menu.enabled(!Egui::SystemPorts::Clipboard.text.to_s.empty?) do |m|
+      m.menu_item(t("edit.paste"), icon: :paste, hotkey: "Ctrl+V") do
+        if (paste = Egui::SystemPorts::Clipboard.text)
+          Kodkod::CodeEditor.insert_text(ctx, buffer, fid,
+            paste.gsub(/\r\n|\r/, "\n"))
+        end
+      end
+    end
+    menu.enabled(buffer.rope.size > 0) do |m|
+      m.menu_item(t("edit.select_all"), hotkey: "Ctrl+A") do
+        Kodkod::CodeEditor.set_selection(ctx, fid, 0, buffer.rope.size)
+      end
     end
   end
 

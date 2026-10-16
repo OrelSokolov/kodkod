@@ -75,6 +75,11 @@ module Kodkod
         "tab.close_right"      => "Close Tabs to the Right",
         "tab.close_all"        => "Close All Tabs",
         "tab.copy_path"        => "Copy Path",
+        # editor context menu
+        "edit.cut"             => "Cut",
+        "edit.copy"            => "Copy",
+        "edit.paste"           => "Paste",
+        "edit.select_all"      => "Select All",
         # settings page
         "settings.title"       => "Settings",
         "settings.theme"       => "Theme:",
@@ -172,6 +177,11 @@ module Kodkod
         "tab.close_right"      => "Закрыть вкладки справа",
         "tab.close_all"        => "Закрыть все вкладки",
         "tab.copy_path"        => "Копировать путь",
+        # editor context menu
+        "edit.cut"             => "Вырезать",
+        "edit.copy"            => "Копировать",
+        "edit.paste"           => "Вставить",
+        "edit.select_all"      => "Выделить всё",
         # settings page
         "settings.title"       => "Настройки",
         "settings.theme"       => "Тема:",

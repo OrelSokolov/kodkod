@@ -57,7 +57,8 @@ module Kodkod
                    @cursor_style : Symbol = :block,
                    @cursor_blinks : Bool = true,
                    @cursor_line : Bool = true,
-                   @syntax_highlight : Bool = true)
+                   @syntax_highlight : Bool = true,
+                   @on_context_menu : (Egui::Ui ->)? = nil)
     end
 
     # Global (ui-scope-independent) widget id — see the file header.
@@ -279,6 +280,16 @@ module Kodkod
       response = ui.interact(rect, id,
         Egui::Sense::Click | Egui::Sense::Drag | Egui::Sense::Focusable)
       ui.ctx.set_cursor_icon(Egui::CursorIcon::Text) if response.hovered?
+
+      # Right-click menu, app-supplied (Cut/Copy/Paste/Select All via
+      # the class API — works in EVERY VIM mode, where the widget
+      # keyboard is off and Ctrl+C/Backspace never reach
+      # handle_keyboard). A secondary press never registers as
+      # pressed?/clicked? (primary-only), so the drag selection under
+      # the pointer survives the menu opening.
+      if (cm = @on_context_menu)
+        response.context_menu { |menu| cm.call(menu) }
+      end
 
       digits = {lines.to_s.size, 3}.max
       gutter_w = digits.to_f64 * char_w + GUTTER_PAD * 2.0
@@ -1050,9 +1061,10 @@ class Egui::Ui
                   cursor_style : Symbol = :block,
                   cursor_blinks : Bool = true,
                   cursor_line : Bool = true,
-                  syntax_highlight : Bool = true) : Egui::Response
+                  syntax_highlight : Bool = true,
+                  on_context_menu : (Egui::Ui ->)? = nil) : Egui::Response
     add(Kodkod::CodeEditor.new(buffer, focus_id, keyboard,
       escape_clears_focus, tab, rows, cursor_style, cursor_blinks,
-      cursor_line, syntax_highlight))
+      cursor_line, syntax_highlight, on_context_menu))
   end
 end

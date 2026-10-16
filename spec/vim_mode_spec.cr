@@ -436,4 +436,72 @@ describe Kodkod::VimMode do
     vim_frame(ctx, vim, b, "v1", events: type("X"), time: 0.064)
     Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 1})
   end
+
+  it "Ctrl+C copies a mouse-made selection in normal mode" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("hello world")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    # What a mouse drag leaves behind: a caret/anchor pair.
+    Kodkod::CodeEditor.set_selection(ctx, "v1", 0, 5)
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::C,
+        Egui::Modifiers.new(ctrl: true))],
+      time: 0.048)
+    Egui::SystemPorts::Clipboard.text.should eq("hello")
+    b.text.should eq("hello world") # copy only
+    vim.mode.normal?.should be_true
+  end
+
+  it "Backspace deletes a mouse-made selection in normal mode" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("hello world")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    Kodkod::CodeEditor.set_selection(ctx, "v1", 0, 5)
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Backspace)],
+      time: 0.048)
+    b.text.should eq(" world")
+    Kodkod::CodeEditor.cursor_offset(ctx, "v1").should eq(0)
+  end
+
+  it "Ctrl+X cuts a mouse-made selection in normal mode" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("hello world")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    Kodkod::CodeEditor.set_selection(ctx, "v1", 0, 5)
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::X,
+        Egui::Modifiers.new(ctrl: true))],
+      time: 0.048)
+    Egui::SystemPorts::Clipboard.text.should eq("hello")
+    b.text.should eq(" world")
+  end
+
+  it "Ctrl+C yanks and leaves visual mode" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("hello")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    Kodkod::CodeEditor.set_cursor(ctx, b, "v1", 0, 0)
+    vim_frame(ctx, vim, b, "v1", events: type("v"), time: 0.048)
+    vim_frame(ctx, vim, b, "v1", events: type("l"), time: 0.056)
+    vim.mode.visual?.should be_true
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::C,
+        Egui::Modifiers.new(ctrl: true))],
+      time: 0.064)
+    Egui::SystemPorts::Clipboard.text.should eq("he")
+    vim.mode.normal?.should be_true
+  end
 end
