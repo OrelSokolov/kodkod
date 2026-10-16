@@ -32,6 +32,7 @@ describe "language detection" do
     app.lang_for("viewController.mm").should eq("objectivec")
     app.lang_for("page.phtml").should eq("php-template")
     app.lang_for("build.mk").should eq("makefile")
+    app.lang_for("api/users/index.json.jbuilder").should eq("ruby")
   end
 
   it "falls back to the basename for extensionless files" do

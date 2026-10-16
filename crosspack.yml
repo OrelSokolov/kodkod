@@ -14,7 +14,7 @@
 # (rake build:native).
 
 name: kodkod
-version: 0.1.0              # keep in step with shard.yml and AboutTab::VERSION
+version: 0.1.1              # keep in step with shard.yml and AboutTab::VERSION
 
 build:
   output: builds

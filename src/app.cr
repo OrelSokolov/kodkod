@@ -47,6 +47,7 @@ class KodkodApp < Egui::App
   LANG_BY_EXT = {
     ".cr"  => "crystal", ".rb" => "ruby",
     ".rake" => "ruby", ".ru" => "ruby", ".gemspec" => "ruby",
+    ".jbuilder" => "ruby",
     ".erb" => "erb",
     ".c"   => "c", ".h" => "c",
     ".cpp" => "cpp", ".hpp" => "cpp", ".cc" => "cpp",
@@ -833,7 +834,8 @@ class KodkodApp < Egui::App
   # quit flow does (advance_close_queue). Cancel stops the batch.
   private def close_batch(docs : Array(Doc)) : Nil
     docs = docs.select { |d| @docs.includes?(d) }
-    clean, dirty = docs.partition(&.dirty?)
+    # partition yields the block-TRUE elements first: dirty, then clean.
+    dirty, clean = docs.partition(&.dirty?)
     clean.each { |d| do_close(d) }
     if dirty.empty?
       @status = t("status.closed_n", n: docs.size) unless docs.empty?

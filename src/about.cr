@@ -16,7 +16,7 @@ module Kodkod
           .gsub("fill:#000000", "fill:currentColor")
 
     # Keep in step with shard.yml.
-    VERSION = "0.1.0"
+    VERSION = "0.1.1"
 
     @i18n : Kodkod::I18n
     @svg : Egui::Svg

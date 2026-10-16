@@ -11,7 +11,7 @@ require "option_parser"
 
 module Kodkod
   # Keep in sync with shard.yml.
-  VERSION = "0.1.0"
+  VERSION = "0.1.1"
 
   struct CLIOptions
     getter theme : String?
