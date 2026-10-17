@@ -69,4 +69,27 @@ describe Kodkod::EditorBuffer do
     # (plain rendering), never raise.
     b.token_spans.should be_nil
   end
+
+  it "detects external changes through disk_mtime" do
+    path = File.tempname("kodkod", ".cr")
+    File.write(path, "x = 1\n")
+    begin
+      b = Kodkod::EditorBuffer.new(File.read(path), path: path)
+      b.disk_mtime = File.info(path).modification_time
+      b.changed_on_disk?.should be_false
+      # An external write (or a plain touch) moves the mtime.
+      File.touch(path, Time.utc + 1.minute)
+      b.changed_on_disk?.should be_true
+      # Re-syncing on our own save swallows the event.
+      b.disk_mtime = File.info(path).modification_time
+      b.changed_on_disk?.should be_false
+    ensure
+      File.delete(path)
+    end
+  end
+
+  it "treats a missing file as unchanged (nothing to reload)" do
+    b = Kodkod::EditorBuffer.new("x", path: "/no/such/file/kodkod.spec")
+    b.changed_on_disk?.should be_false
+  end
 end

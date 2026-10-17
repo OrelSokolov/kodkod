@@ -13,6 +13,10 @@ module Kodkod
     property path : String?
     property lang : String?
     property? dirty : Bool = false
+    # The file's mtime as the app last saw it (set on open, save, and
+    # reload — see KodkodApp). An fs event arriving with an unchanged
+    # mtime is the app's own write, not an external change.
+    property disk_mtime : Time? = nil
 
     # Files above this many characters skip whole-file tokenization:
     # the highlight pass is synchronous, and past half a megabyte the
@@ -31,6 +35,15 @@ module Kodkod
 
     def text : String
       @rope.to_s
+    end
+
+    # Whether the file on disk no longer matches the app's last known
+    # state — an external change to the file behind an open tab (a
+    # missing file is not a change: nothing to reload from). The
+    # reload prompt keys off this (see KodkodApp#on_doc_fs_event).
+    def changed_on_disk? : Bool
+      return false unless (path = @path) && (info = File.info?(path))
+      info.modification_time != @disk_mtime
     end
 
     def version : Int32

@@ -7,6 +7,7 @@
 
 require "json"
 require "mime"
+require "fswatch"
 require "./editor_buffer"
 require "./code_editor"
 require "./file_tree"
@@ -14,6 +15,7 @@ require "./file_viewer"
 require "./about"
 require "./app_icon"
 require "./i18n"
+require "./reload_queue"
 require "./vim_command"
 require "./vim_mode"
 
@@ -142,6 +144,15 @@ class KodkodApp < Egui::App
   # The dirty docs awaiting the confirm-close modal (a batch close
   # from the tab context menu walks them one by one — see close_batch).
   @close_queue = [] of Doc
+  # The disk-change prompts: paths of open files changed externally
+  # (fswatch), waiting for their one-at-a-time modal. The path whose
+  # modal is currently up sits in @pending_reload (see
+  # pump_reload_queue / the "root/reload" route).
+  @reload_queue = Kodkod::ReloadQueue.new
+  @pending_reload : String? = nil
+  # One non-recursive fswatch per open text file (the tree's watch
+  # covers only the workspace folder — open files may live anywhere).
+  @file_watches = {} of String => FSWatch::Watch
   @hotkeys_ready = false
   @focused_tab_version : UInt64 = UInt64::MAX
   @pending_close : Doc? = nil
@@ -291,6 +302,12 @@ class KodkodApp < Egui::App
     # Deep-link: `--page root/about` opens the modal (the same way
     # root/settings deep-links; the router pops back on Close).
     @about_open ||= ctx.router.current.page_id == "root/about"
+
+    # The disk-change prompts (before the routes block: the modal's
+    # decl must register the same frame the queue pops, or the fresh
+    # route would render a frame of "not found").
+    sync_file_watches
+    pump_reload_queue
 
     ctx.routes do |r|
       r.page "root/root" do
@@ -540,6 +557,26 @@ class KodkodApp < Egui::App
         end
       end
 
+      if @pending_reload
+        reload_doc = @docs.find { |d| d.path == @pending_reload && d.buffer? }
+        if reload_doc
+          pending_doc = reload_doc.not_nil!
+          pending_path = pending_doc.path.not_nil!
+          r.modal "root/reload",
+            title: t("reload.title"),
+            buttons: [t("reload.reload"), t("reload.keep")],
+            on_button: ->(label : String) {
+              @pending_reload = nil
+              ctx.router.back
+              reload_from_disk(pending_doc) if label == t("reload.reload")
+            } do |ui|
+            ui.label(t("reload.body", title: pending_doc.title,
+              path: pending_path))
+            ui.label(t("reload.ask"))
+          end
+        end
+      end
+
       if @about_open
         r.modal "root/about", title: t("about.title"), width: 420.0,
           buttons: [t("about.close")],
@@ -683,8 +720,10 @@ class KodkodApp < Egui::App
     begin
       text = File.read(expanded)
       # A trailing newline is the file's business; the rope is as-is.
-      @docs << make_doc(Kodkod::EditorBuffer.new(text, path: expanded,
-        lang: lang_for(expanded)))
+      buffer = Kodkod::EditorBuffer.new(text, path: expanded,
+        lang: lang_for(expanded))
+      buffer.disk_mtime = File.info?(expanded).try(&.modification_time)
+      @docs << make_doc(buffer)
       self.selected = @docs.size - 1
       @status = t("status.opened_kib", path: expanded, kib: text.bytesize / 1024)
       true
@@ -750,6 +789,8 @@ class KodkodApp < Egui::App
       File.write(path, buffer.text)
       buffer.path = path
       buffer.dirty = false
+      # The save's own fs event must not read as an external change.
+      buffer.disk_mtime = File.info?(path).try(&.modification_time)
       # Re-highlight for the possibly-new language.
       buffer.lang = lang_for(path)
       @status = t("status.saved", path: path)
@@ -757,6 +798,87 @@ class KodkodApp < Egui::App
     rescue e : IO::Error | File::Error
       @status = t("status.cannot_write", path: path, err: e.message.to_s)
       false
+    end
+  end
+
+  # --- disk-change prompts ---------------------------------------------
+  #
+  # An external write to an OPEN file (another program, another
+  # instance) owes the tab one question: reload from disk, or keep the
+  # editor's version? The fswatch shard reports the change; the doc's
+  # disk-mtime says whether it was really someone else (the app's own
+  # saves match). Prompts queue per path and show ONE modal at a time
+  # — and only once the user is back at the window, so an unfocused
+  # app never throws dialogs at the screen (see pump_reload_queue).
+
+  # Reconcile the per-file watches with the open text tabs (runs every
+  # frame; create/stop are no-ops unless the tab set moved — the tree's
+  # recursive watch covers only the workspace folder, open files may
+  # live anywhere).
+  private def sync_file_watches : Nil
+    wanted = Set(String).new
+    @docs.each do |d|
+      next unless (b = d.buffer?) && (p = b.path)
+      wanted << p
+      next if @file_watches.has_key?(p)
+      @file_watches[p] = FSWatch.watch(p, recursive: false) { |e|
+        on_doc_fs_event(e) }
+    end
+    @file_watches.reject! do |p, w|
+      next false if wanted.includes?(p)
+      w.stop
+      true
+    end
+  end
+
+  # Runs on the shard's observation fiber — same contract as
+  # FileTree.on_fs_event: the scheduler is cooperative, touching app
+  # state is safe as long as this never yields.
+  private def on_doc_fs_event(event : FSWatch::Event) : Nil
+    return if event.dir? || event.overflow?
+    doc = @docs.find { |d| d.path == event.path }
+    return unless doc && (buf = doc.buffer?)
+    # The mtime is the real filter: the app's own saves (and metadata
+    # touches that changed nothing) match disk_mtime and are skipped.
+    return unless buf.changed_on_disk?
+    @reload_queue.enqueue(event.path)
+    ctx.request_repaint # wake the loop for pump_reload_queue
+  end
+
+  # Show the next queued prompt as the "root/reload" modal. One at a
+  # time (any modal already up stands first in line), and only when
+  # the user is AT the window — a key press or click this frame is the
+  # focus signal (the backend exposes no window-focus event; input
+  # arriving IS focus). The active tab's file jumps the queue.
+  private def pump_reload_queue : Nil
+    return if @pending_reload || @pending_close || @about_open
+    return if ctx.memory.modal_open?
+    input = ctx.input
+    return unless input.pointer_pressed? || !input.keys_pressed.empty? ||
+                 !input.text.empty?
+    path = @reload_queue.dequeue(@docs[selected]?.try(&.path)) || return
+    # Stale entries (the tab saved since, or closed) ask nothing.
+    if (doc = @docs.find { |d| d.path == path }) && (buf = doc.buffer?) &&
+       buf.changed_on_disk?
+      @pending_reload = path
+      ctx.router.navigate("root/reload")
+    end
+  end
+
+  # The modal's Reload: reread the file over the rope — the same path
+  # :e takes (caret to the end of the replaced text, clean state).
+  private def reload_from_disk(doc : Doc) : Nil
+    buffer = doc.buffer? || return
+    path = buffer.path || return
+    begin
+      text = File.read(path)
+      Kodkod::CodeEditor.replace_range(ctx, buffer, doc.focus_id.not_nil!,
+        0, buffer.rope.size, text)
+      buffer.dirty = false
+      buffer.disk_mtime = File.info?(path).try(&.modification_time)
+      @status = t("status.reloaded", path: path)
+    rescue e : IO::Error | File::Error
+      @status = t("status.cannot_read", path: path, err: e.message.to_s)
     end
   end
 
@@ -858,7 +980,7 @@ class KodkodApp < Egui::App
 
   private def request_close(doc : Doc?) : Nil
     return unless doc
-    return if @pending_close
+    return if @pending_close || @pending_reload
     if doc.dirty?
       @pending_close = doc
       ctx.router.navigate("root/confirm-close")
@@ -872,6 +994,15 @@ class KodkodApp < Egui::App
     @docs.delete_at(idx)
     self.selected -= 1 if idx < selected
     self.selected = selected.clamp(0, {@docs.size - 1, 0}.max) unless @docs.empty?
+    # No prompts for a closed tab: drop its queued entry and, if its
+    # modal happens to be up (a forced :q!), pop that route too.
+    if (path = doc.path)
+      @reload_queue.remove(path)
+      if @pending_reload == path
+        @pending_reload = nil
+        ctx.router.back if ctx.router.current.page_id == "root/reload"
+      end
+    end
     @status = t("status.closed", title: doc.title)
   end
 
@@ -899,6 +1030,7 @@ class KodkodApp < Egui::App
   end
 
   private def quit_flow : Nil
+    return if @pending_reload # one modal at a time — answer it first
     dirty = @docs.select(&.dirty?)
     if dirty.empty?
       Egui::SystemPorts::Quit.quit!

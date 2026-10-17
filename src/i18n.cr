@@ -139,6 +139,13 @@ module Kodkod
         "confirm.discard"      => "Don't save",
         "confirm.cancel"       => "Cancel",
         "confirm.body"         => "\"%{title}\" has unsaved changes.",
+        # disk-change reload modal
+        "reload.title"         => "File changed on disk",
+        "reload.body"          => "\"%{title}\" (%{path}) was changed on disk by another program.",
+        "reload.ask"           => "Reload it from disk?",
+        "reload.reload"        => "Reload",
+        "reload.keep"          => "Keep the editor's version",
+        "status.reloaded"      => "Reloaded: %{path}",
       } of String => String,
       "ru" => {
         # menu bar
@@ -241,6 +248,13 @@ module Kodkod
         "confirm.discard"      => "Не сохранять",
         "confirm.cancel"       => "Отмена",
         "confirm.body"         => "У «%{title}» есть несохранённые изменения.",
+        # disk-change reload modal
+        "reload.title"         => "Файл изменён на диске",
+        "reload.body"          => "«%{title}» (%{path}) изменён на диске другой программой.",
+        "reload.ask"           => "Перезагрузить его с диска?",
+        "reload.reload"        => "Перезагрузить",
+        "reload.keep"          => "Оставить как в редакторе",
+        "status.reloaded"      => "Перезагружено: %{path}",
       } of String => String,
     } of String => Hash(String, String)
   end
