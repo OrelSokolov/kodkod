@@ -45,6 +45,17 @@ describe Kodkod::QuickOpen do
           .should eq([".cache/x.bin", ".hidden", "visible.txt"])
       end
     end
+    it "does not follow symlinked directories (shard lib loops)" do
+      with_temp_dir do |dir|
+        Dir.mkdir(File.join(dir, "src"))
+        File.touch(File.join(dir, "src", "a.cr"))
+        # A symlink pointing back at the workspace root — following it
+        # would recurse until the caps cut the walk off.
+        File.symlink(dir, File.join(dir, "loop"))
+        Kodkod::QuickOpen.files_under(dir, show_hidden: false)
+          .should eq(["src/a.cr"])
+      end
+    end
   end
 
   describe ".rank" do
@@ -61,6 +72,36 @@ describe Kodkod::QuickOpen do
       rows.map(&.[0]).should eq(["src/app.cr"])
       # The match result carries the positions (for highlighting).
       rows[0][1].should_not be_nil
+    end
+
+    it "ranks a name match above a path-only match (RubyMine-style)" do
+      # The old full-path scorer put "app/views/home.html" first: its
+      # "app" sits at the very start of the path. A match in the file
+      # NAME must win regardless of depth.
+      files = ["app/views/home.html", "deep/nested/app.cr"]
+      rows = Kodkod::QuickOpen.rank(files, "app")
+      rows.map(&.[0]).should eq(["deep/nested/app.cr", "app/views/home.html"])
+    end
+
+    it "scores the name tier by the name alone, prefix first" do
+      files = ["src/quick_open.cr", "src/xopen_very_long_name.cr"]
+      rows = Kodkod::QuickOpen.rank(files, "open")
+      rows.map(&.[0]).should eq(["src/quick_open.cr", "src/xopen_very_long_name.cr"])
+    end
+
+    it "breaks score ties by shorter file name" do
+      # Both names match "app" as a prefix with identical quality; the
+      # vendored long name must not crowd out the short one
+      # (alphabetical order would put lib/ first).
+      files = ["lib/app-indicator-thing.svg", "src/app.cr"]
+      rows = Kodkod::QuickOpen.rank(files, "app")
+      rows.map(&.[0]).should eq(["src/app.cr", "lib/app-indicator-thing.svg"])
+    end
+
+    it "falls back to path-only matches when no name matches" do
+      files = ["app/views/home.html", "src/rope.cr"]
+      rows = Kodkod::QuickOpen.rank(files, "app")
+      rows.map(&.[0]).should eq(["app/views/home.html"])
     end
 
     it "caps the visible rows" do
@@ -109,6 +150,21 @@ describe Kodkod::QuickOpen do
         end
       end
       checked.should be > 50
+    end
+
+    it "scores a suffix from an offset like the sliced string" do
+      scorer = Kodkod::QuickOpen::Scorer.new(48)
+      texts = ["src/syntax/engine.cr", "app/views/home.html",
+               "lib/egui-cr/src/app.cr", "README.md"]
+      queries = ["e", "en", "app", "src", "cr", "hm"]
+      queries.each do |q|
+        texts.each do |t|
+          off = t.bytesize - File.basename(t).bytesize
+          expected = Kodkod::Fuzzy.match(q, t.byte_slice(off)).try(&.score)
+          actual = scorer.score(q.downcase, t.downcase, t, from: off)
+          actual.should eq(expected), "#{q} vs #{t} from #{off}"
+        end
+      end
     end
   end
 end

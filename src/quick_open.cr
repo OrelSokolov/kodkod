@@ -1,7 +1,10 @@
 # kodkod — the Sublime-style fuzzy file finder (Ctrl+P): a floating
 # panel at the top of the window with a query field over a live
-# fuzzy-filtered list of the workspace files (Kodkod::Fuzzy ranking).
-# Up/Down walk the list, Enter opens, Esc or a click outside closes.
+# fuzzy-filtered list of the workspace files. Ranking is RubyMine-like:
+# matches in the file NAME outrank matches confined to the path, and
+# the name is scored on its own (prefix first, then word boundaries,
+# then scattered). Up/Down walk the list, Enter opens, Esc or a click
+# outside closes.
 #
 # The panel is a framework `ctx.popup`: riding the Foreground layer,
 # closed automatically on an outside click. The query field would
@@ -15,6 +18,7 @@
 # only runs on files that pass the cheap subsequence gate.
 
 require "egui-cr/egui"
+require "./fuzzy"
 
 module Kodkod
   class QuickOpen
@@ -42,6 +46,12 @@ module Kodkod
     # compare case-insensitively; re-lowercasing 20k paths every
     # keystroke is pure garbage-churn.
     @files_lc = [] of String
+    # Byte offset of each file's name within its path and its length
+    # (tier-0 scoring runs over the name suffix; the offsets keep it
+    # allocation-free, the lengths break score ties — shorter name,
+    # higher rank, like RubyMine).
+    @name_off = [] of Int32
+    @name_len = [] of Int32
     @focus_pending = false
     @was_open = false
     # The cached visible rows + the query/files they were computed for
@@ -73,12 +83,15 @@ module Kodkod
       ctx.open_popup(POPUP_ID)
     end
 
-    # The searchable list (workspace-relative paths) and its lowercase
-    # twin; both row caches drop so the next #rows recomputes, and the
-    # scorer's reusable buffers resize to the longest path.
+    # The searchable list (workspace-relative paths), its lowercase
+    # twin and per-file name offsets; the row caches drop so the next
+    # #rows recomputes, and the scorer's reusable buffers resize to the
+    # longest path.
     def files=(files : Array(String))
       @files = files
       @files_lc = files.map(&.downcase)
+      @name_off = files.map { |f| self.class.name_offset(f) }
+      @name_len = files.map_with_index { |f, i| f.bytesize - @name_off[i] }
       @scorer = Scorer.new(files.empty? ? 1 : files.max_of(&.size))
       @rows_query = nil
       @cand_query = nil
@@ -180,10 +193,21 @@ module Kodkod
     end
 
     # The cached rows' source: an allocation-free subsequence gate over
-    # the pre-lowercased paths, then score-only DP on the candidates
-    # through a buffer-reusing Scorer (capped — see SCORE_CAP), ranked
-    # by score (stable on ties). Only the top rows pay for Fuzzy.match
-    # — the positions it returns are just for highlighting.
+    # the pre-lowercased paths, then two-tier scoring (RubyMine-style)
+    # on the candidates through a buffer-reusing Scorer (capped — see
+    # SCORE_CAP):
+    #
+    #   tier 0 — the query matches the file NAME (scored over the name
+    #   alone: a name prefix beats a name middle, regardless of how
+    #   deep the file sits);
+    #   tier 1 — only the path matches (scored over the full path,
+    #   the old behavior).
+    #
+    # Tier 0 always outranks tier 1; within a tier, score desc, then
+    # the shorter file name first (equal-quality matches in long
+    # vendored names must not crowd out `src/app.cr`), then input
+    # order. Only the top rows pay for Fuzzy.match — the positions it
+    # returns are just for highlighting.
     #
     # When the new query EXTENDS the cached one the gate runs over the
     # previous survivors only — a longer query cannot admit a path the
@@ -207,18 +231,20 @@ module Kodkod
       @cand = gate
       @cand_query = dquery
 
-      scored = [] of {Int32, Int32}
+      scored = [] of {Int32, Int32, Int32, Int32} # {index, tier, score, len}
       gate.first(SCORE_CAP).each do |idx|
-        if s = @scorer.score(dquery, @files_lc[idx], @files[idx])
-          scored << {idx, s}
+        off = @name_off[idx]
+        if s = @scorer.score(dquery, @files_lc[idx], @files[idx], from: off)
+          scored << {idx, 0, s, @name_len[idx]}
+        elsif s = @scorer.score(dquery, @files_lc[idx], @files[idx])
+          scored << {idx, 1, s, @name_len[idx]}
         end
       end
-      scored.sort_by! { |idx, s| {-s, idx} }
+      scored.sort_by! { |idx, tier, s, len| {tier, -s, len, idx} }
       @match_count = gate.size
-      scored.first(MAX_ROWS).map do |idx, _s|
-        res = Fuzzy.match(@query, @files[idx],
-                          down_query: dquery, down_text: @files_lc[idx])
-        {@files[idx], res.as(Fuzzy::Result?)}
+      scored.first(MAX_ROWS).map do |idx, tier, _s|
+        {@files[idx],
+         self.class.match_result(@files[idx], @query, tier).as(Fuzzy::Result?)}
       end
     end
 
@@ -240,17 +266,57 @@ module Kodkod
       false
     end
 
+    # Byte offset of the file name within a workspace-relative path
+    # (0 for root files). Paths are ASCII, so byte == char offset.
+    def self.name_offset(path : String) : Int32
+      path.bytesize - File.basename(path).bytesize
+    end
+
     # The visible rows for *query* (uncached, for callers/tests): with
     # an empty query the files in their natural (sorted) order,
-    # otherwise the fuzzy-filtered best matches first (score desc,
-    # stable on ties).
+    # otherwise RubyMine-style — files whose NAME matches the query
+    # first (score desc over the name alone, shorter names on ties),
+    # then path-only matches (score desc over the full path), stable
+    # on ties.
     def self.rank(files : Array(String), query : String,
                   limit : Int32 = MAX_ROWS) : Array({String, Fuzzy::Result?})
       if query.empty?
         files.first(limit).map { |path| {path, nil.as(Fuzzy::Result?)} }
       else
-        Fuzzy.filter(files, query).first(limit)
-                    .map { |idx, res| {files[idx], res.as(Fuzzy::Result?)} }
+        # The two-tier ranking `#filter_files` documents in detail:
+        # tier 0 = the query matches the file name, tier 1 = only the
+        # path. This uncached twin uses Fuzzy.match directly (the
+        # Scorer's scores are pinned equal to it by spec, so the
+        # orderings agree).
+        scored = [] of {Int32, Int32, Int32, Int32} # {index, tier, score, len}
+        files.each_with_index do |path, idx|
+          next unless Fuzzy.matches?(query, path)
+          off = name_offset(path)
+          if r = Fuzzy.match(query, path.byte_slice(off))
+            scored << {idx, 0, r.score, path.bytesize - off}
+          elsif r = Fuzzy.match(query, path)
+            scored << {idx, 1, r.score, path.bytesize - off}
+          end
+        end
+        scored.sort_by! { |idx, tier, s, len| {tier, -s, len, idx} }
+        scored.first(limit).map do |idx, tier, _s, _len|
+          {files[idx], match_result(files[idx], query, tier).as(Fuzzy::Result?)}
+        end
+      end
+    end
+
+    # The highlight result for a ranked row: tier 0 matched the name —
+    # positions are recomputed over the name and shifted so the row
+    # renderer (which indexes into the full path) keeps one code path.
+    def self.match_result(path : String, query : String,
+                          tier : Int32) : Fuzzy::Result?
+      if tier == 0
+        off = name_offset(path)
+        Fuzzy.match(query, path.byte_slice(off)).try do |r|
+          Fuzzy::Result.new(r.score, r.positions.map(&.+ off))
+        end
+      else
+        Fuzzy.match(query, path)
       end
     end
 
@@ -273,6 +339,11 @@ module Kodkod
         next if !show_hidden && name.starts_with?('.')
         path = File.join(dir, name)
         relname = rel.empty? ? name : "#{rel}/#{name}"
+        # Symlinks are skipped, not followed: shards' lib/ symlinks
+        # point back into the workspace, and following them duplicated
+        # whole subtrees until the caps cut the walk off — Ctrl+P then
+        # listed vendored noise instead of src/.
+        next if File.symlink?(path)
         if File.directory?(path)
           walk(path, relname, show_hidden, acc, depth + 1)
         else
@@ -432,12 +503,19 @@ module Kodkod
       # *dt* (*text* is the original-case string the camelCase bonus
       # reads), or nil when *dt* does not contain *dq* as a
       # subsequence. Buffers must be at least dt.size long.
-      def score(dq : String, dt : String, text : String) : Int32?
+      #
+      # *from* scores the suffix starting at that byte offset as if it
+      # were the whole string (its first char gets the boundary bonus,
+      # gap penalties count from it) — the file NAME without slicing a
+      # new string per candidate. Equivalent to scoring
+      # `dt.byte_slice(from)` / `text.byte_slice(from)`.
+      def score(dq : String, dt : String, text : String,
+                from : Int32 = 0) : Int32?
         m = dq.size
-        n = dt.size
+        n = dt.size - from
         return nil if m > n
         return nil if n > @bonus.size
-        compute_bonus(text, n)
+        compute_bonus(text, from, n)
         bonus = @bonus.to_unsafe
         dqp = dq.to_unsafe
         dtp = dt.to_unsafe
@@ -450,7 +528,7 @@ module Kodkod
           q0 = dqp[0]
           best = neg
           n.times do |i|
-            next unless dtp[i] == q0
+            next unless dtp[from + i] == q0
             s = match + bonus[i] - gap * i
             best = s if s > best
           end
@@ -470,7 +548,7 @@ module Kodkod
 
         q0 = dqp[0]
         n.times do |i|
-          if dtp[i] == q0
+          if dtp[from + i] == q0
             sp[i] = match + bonus[i] - gap * i
           end
           pp[i] = i == 0 ? sp[0] : {sp[i], pp[i - 1] - gap}.max
@@ -479,7 +557,7 @@ module Kodkod
         (1...m).each do |j|
           qj = dqp[j]
           (j..(n - m + j)).each do |i|
-            next unless dtp[i] == qj
+            next unless dtp[from + i] == qj
             # See Fuzzy.match: no BONUS_CONSECUTIVE on a NEG_INF
             # diagonal — the sentinel must never enter score arithmetic.
             prev_s = sp[i - 1]
@@ -512,8 +590,10 @@ module Kodkod
 
       # Fuzzy.compute_bonus into the reusable buffer (ASCII byte
       # classes; bytes >= 0x80 classify as separators, exactly like
-      # non-ASCII chars fail #ascii_alphanumeric?).
-      private def compute_bonus(text : String, n : Int32) : Nil
+      # non-ASCII chars fail #ascii_alphanumeric?). Indices are
+      # relative to the suffix starting at *from*; its first char
+      # always gets the boundary bonus (it is a name start).
+      private def compute_bonus(text : String, from : Int32, n : Int32) : Nil
         bonus = @bonus.to_unsafe
         tp = text.to_unsafe
         boundary = Fuzzy::BONUS_BOUNDARY
@@ -522,8 +602,8 @@ module Kodkod
           if i == 0
             bonus[0] = boundary
           else
-            prev = tp[i - 1]
-            cur = tp[i]
+            prev = tp[from + i - 1]
+            cur = tp[from + i]
             alnum_prev = prev.in?(48..57) || prev.in?(65..90) ||
                          prev.in?(97..122)
             bonus[i] = if !alnum_prev
