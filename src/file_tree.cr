@@ -22,11 +22,17 @@
 # compile-time-embedded lucide SVGs: folder / folder-open for
 # directories, a per-extension map for files, `file` as the fallback.
 #
-# KEYBOARD: rows are Sense::Focusable, so egui's geometric focus
-# navigation walks them with Up/Down (a focused row requests focus on
-# click, too), and Enter on the focused row acts exactly like a click
-# — toggling a directory, activating a file. The widget owns its
-# ScrollArea (stable id under `base`) so the focused row can be
+# KEYBOARD: rows are Sense::Focusable, and a focused row claims the
+# arrow keys (egui's geometric focus navigation would otherwise leap
+# to whatever focusable sits nearest in that direction ANYWHERE in
+# the window — the code editor, the terminal — which reads as random
+# rows lighting up). Instead the walk collects the visible rows in
+# display order and the widget navigates the list itself: Up/Down
+# step one row, Right expands a collapsed folder (or descends into
+# an open one), Left collapses an open folder (or jumps to the
+# parent row), and Enter on the focused row acts exactly like a
+# click — toggling a directory, activating a file. The widget owns
+# its ScrollArea (stable id under `base`) so the focused row can be
 # scrolled into view after the arrows walk it off-screen.
 
 require "egui-cr/egui"
@@ -206,7 +212,11 @@ module Kodkod
       # The tree scrolls in its OWN area (a stable id under `base`) so
       # the focused row's rect, recorded during the walk, can be
       # brought into view afterwards (see scroll_focus_into_view).
-      # Reset before the walk: this frame's focus target, if any.
+      # Reset before the walk: this frame's focus target, if any — and
+      # the visible-row list the keyboard navigation walks (see
+      # `navigate`).
+      @rows.clear
+      @focused_index = nil
       @focus_rect = nil
       @focus_path = nil
       @active_rect = nil
@@ -243,6 +253,53 @@ module Kodkod
       memory.data.set_string(focus_cell, @focus_path || "")
       if @reveal && (rect = @active_rect)
         scroll_rect_into_view(ui.ctx, memory, scroll_id, viewport, rect)
+      end
+      navigate(ui.ctx, memory)
+    end
+
+    # Keyboard navigation over THIS frame's visible rows: Up/Down step
+    # one row in display order, Right expands a collapsed folder or
+    # descends into an open one's first child, Left collapses an open
+    # folder or climbs to the parent row. Focus requests apply next
+    # frame (Focus#request); the scroll-into-view in `ui` follows the
+    # focus change as usual. Runs after the walk, when @rows and
+    # @focused_index are complete.
+    private def navigate(ctx : Egui::Context, memory : Egui::Memory) : Nil
+      i = @focused_index
+      return unless i
+      rows = @rows
+      row = rows[i]
+      input = ctx.input
+      if input.consume_key(Egui::KeyCode::Down)
+        if i + 1 < rows.size
+          memory.focus.request(rows[i + 1].node_id)
+          ctx.request_repaint
+        end
+      elsif input.consume_key(Egui::KeyCode::Up)
+        if i > 0
+          memory.focus.request(rows[i - 1].node_id)
+          ctx.request_repaint
+        end
+      elsif input.consume_key(Egui::KeyCode::Right)
+        if row.dir && !row.open
+          memory.data.set_bool(row.node_id, true)
+          ctx.request_repaint
+        elsif row.dir && i + 1 < rows.size # open: first child
+          memory.focus.request(rows[i + 1].node_id)
+          ctx.request_repaint
+        end
+      elsif input.consume_key(Egui::KeyCode::Left)
+        if row.dir && row.open
+          memory.data.set_bool(row.node_id, false)
+          ctx.request_repaint
+        else # file or collapsed folder: climb to the parent row
+          (i - 1).downto(0) do |j|
+            next unless rows[j].depth == row.depth - 1
+            memory.focus.request(rows[j].node_id)
+            ctx.request_repaint
+            break
+          end
+        end
       end
     end
 
@@ -364,8 +421,9 @@ module Kodkod
     # open state, and the icon column starts right at the indent.
     #
     # Rows are also Sense::Focusable: click takes focus, Up/Down walk
-    # the rows through egui's geometric focus navigation, and Enter on
-    # the focused row acts exactly like a click (activate below).
+    # the visible rows (see `navigate` — the focused row claims the
+    # arrows from egui's geometric navigation), and Enter on the
+    # focused row acts exactly like a click (activate below).
     private def row(ui : Egui::Ui, memory : Egui::Memory,
                     node_id : Egui::Id, path : String, depth : Int32,
                     dir : Bool, open : Bool, active : Bool,
@@ -389,8 +447,17 @@ module Kodkod
       response = ui.interact(row_rect, node_id,
         Egui::Sense.click | Egui::Sense::Focusable)
       focused = response.has_focus?
-      @focus_rect = row_rect if focused
-      @focus_path = path if focused
+      @rows << Row.new(node_id, path, dir, open, depth)
+      if focused
+        @focus_rect = row_rect
+        @focus_path = path
+        @focused_index = @rows.size - 1
+        # Claim the arrows for the NEXT frame too: egui's geometric
+        # focus navigation (Memory#navigate_focus, begin_frame) would
+        # otherwise race our list walk and leap to focusables outside
+        # the tree. `navigate` below consumes the keys during render.
+        memory.focus.lock_arrows(horizontal: true, vertical: true)
+      end
       @active_rect = row_rect if active
 
       if response.clicked?
@@ -493,6 +560,12 @@ module Kodkod
     # `active` changed since the previous frame.
     @active_rect : Egui::Rect?
     @reveal = false
+    # The visible rows of THIS frame's walk, in display order, plus
+    # the index of the focused one — what `navigate` walks.
+    record Row, node_id : Egui::Id, path : String, dir : Bool, open : Bool,
+      depth : Int32
+    @rows = [] of Row
+    @focused_index : Int32?
   end
 end
 
@@ -512,10 +585,12 @@ class Egui::Ui
   # folder icons alone.
   #
   # The widget brings its own scroll area. Rows are keyboard-navigable:
-  # click (or Tab) focuses a row, Up/Down walk the visible rows, Enter
-  # toggles a folder or opens a file, and a row focus MOVES to is
-  # scrolled into view automatically (a row merely KEEPING focus never
-  # fights the user's own scrolling).
+  # click (or Tab) focuses a row, Up/Down walk the visible rows in
+  # display order, Right expands a folder (or steps into an open one's
+  # first child), Left collapses a folder (or climbs to the parent
+  # row), Enter toggles a folder or opens a file, and a row focus
+  # MOVES to is scrolled into view automatically (a row merely KEEPING
+  # focus never fights the user's own scrolling).
   def file_tree(id : String, root : String, active : String? = nil,
                 show_hidden : Bool = false, chevrons : Bool = true,
                 &on_activate : String ->) : Nil

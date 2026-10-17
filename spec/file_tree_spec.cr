@@ -320,6 +320,129 @@ describe Kodkod::FileTree do
       end
     end
 
+    it "Up/Down walk the VISIBLE tree in display order" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        # root → src (open) → deep (collapsed), a.cr, zebra.txt — the
+        # walk order is exactly the display order (folders first),
+        # nested rows included.
+        Dir.mkdir_p(File.join(dir, "src", "deep"))
+        File.touch(File.join(dir, "src", "a.cr"))
+        File.touch(File.join(dir, "zebra.txt"))
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
+        a_id = base.child(Egui::Id.from(File.join(dir, "src", "a.cr")).value)
+        deep_id = base.child(Egui::Id.from(File.join(dir, "src", "deep")).value)
+        zebra_id = base.child(Egui::Id.from(File.join(dir, "zebra.txt")).value)
+        ctx.memory.data.set_bool(root_id, true)
+        ctx.memory.data.set_bool(src_id, true)
+
+        noop = ->(_p : String) {}
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.request(root_id)
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+
+        [src_id, deep_id, a_id, zebra_id].each do |expected|
+          key_frame(ctx, dir, [Egui::KeyCode::Down]) { |p| noop.call(p) }
+          key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+          ctx.memory.focus.id.should eq(expected)
+        end
+
+        # Down past the last row and Up past the first are no-ops.
+        key_frame(ctx, dir, [Egui::KeyCode::Down]) { |p| noop.call(p) }
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.id.should eq(zebra_id)
+
+        [a_id, deep_id, src_id, root_id].each do |expected|
+          key_frame(ctx, dir, [Egui::KeyCode::Up]) { |p| noop.call(p) }
+          key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+          ctx.memory.focus.id.should eq(expected)
+        end
+      end
+    end
+
+    it "Right expands a collapsed folder, then descends into it" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        Dir.mkdir(File.join(dir, "src"))
+        File.touch(File.join(dir, "src", "a.cr"))
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
+        a_id = base.child(Egui::Id.from(File.join(dir, "src", "a.cr")).value)
+        ctx.memory.data.set_bool(root_id, true)
+
+        noop = ->(_p : String) {}
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.request(src_id)
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+
+        # Collapsed: Right opens it (focus stays on the folder).
+        ctx.memory.data.get_bool(src_id, false).should be_false
+        key_frame(ctx, dir, [Egui::KeyCode::Right]) { |p| noop.call(p) }
+        ctx.memory.data.get_bool(src_id, false).should be_true
+        ctx.memory.focus.id.should eq(src_id)
+
+        # Open: Right steps to the first child row.
+        key_frame(ctx, dir, [Egui::KeyCode::Right]) { |p| noop.call(p) }
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.id.should eq(a_id)
+
+        # On a FILE Right is a no-op.
+        key_frame(ctx, dir, [Egui::KeyCode::Right]) { |p| noop.call(p) }
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.id.should eq(a_id)
+      end
+    end
+
+    it "Left collapses an open folder, or climbs to the parent row" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        Dir.mkdir_p(File.join(dir, "src", "deep"))
+        File.touch(File.join(dir, "src", "deep", "a.cr"))
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
+        deep_id = base.child(Egui::Id.from(File.join(dir, "src", "deep")).value)
+        a_id = base.child(
+          Egui::Id.from(File.join(dir, "src", "deep", "a.cr")).value)
+        [root_id, src_id, deep_id].each do |id|
+          ctx.memory.data.set_bool(id, true)
+        end
+
+        noop = ->(_p : String) {}
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.request(a_id)
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+
+        # On a file Left climbs to the parent row.
+        key_frame(ctx, dir, [Egui::KeyCode::Left]) { |p| noop.call(p) }
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.id.should eq(deep_id)
+
+        # On an open folder Left collapses it (focus stays).
+        ctx.memory.data.get_bool(deep_id, false).should be_true
+        key_frame(ctx, dir, [Egui::KeyCode::Left]) { |p| noop.call(p) }
+        ctx.memory.data.get_bool(deep_id, false).should be_false
+        ctx.memory.focus.id.should eq(deep_id)
+
+        # Collapsed: Left climbs to the parent again.
+        key_frame(ctx, dir, [Egui::KeyCode::Left]) { |p| noop.call(p) }
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.id.should eq(src_id)
+
+        # Left on the OPEN root row collapses it — there is no parent
+        # row to climb to, and focus stays put.
+        ctx.memory.focus.request(root_id)
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        key_frame(ctx, dir, [Egui::KeyCode::Left]) { |p| noop.call(p) }
+        ctx.memory.data.get_bool(root_id, true).should be_false
+        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        ctx.memory.focus.id.should eq(root_id)
+      end
+    end
+
     it "scrolls the focused row into view" do
       ctx = Egui::Context.new
       with_temp_dir do |dir|
