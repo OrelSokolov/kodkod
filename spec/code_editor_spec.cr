@@ -542,3 +542,40 @@ describe "CodeEditor Ctrl links are token-aware" do
     underlines.size.should eq(1)
   end
 end
+
+describe "CodeEditor ctrl-click jump vs the widget's own persist" do
+  it "a jump from inside on_ctrl_click survives the frame" do
+    # Regression: the callback runs INSIDE #ui, and the bottom of #ui
+    # persisted the LOCAL cursor (the click caret) over whatever the
+    # callback had written — a same-tab jump to a line above left the
+    # caret on the click line.
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("MAX = 100\nx = MAX + 1\nmore\n")
+    jump = ->(off : Int32) {
+      Kodkod::CodeEditor.goto_line(ctx, b, "t1", 0, 0)
+    }
+    ctrl = Egui::Modifiers.new(ctrl: true)
+    # (110, 44) lands inside the MAX word on line 2 (offset 14).
+    pos = Egui::Pos2.new(110.0, 44.0)
+    # Warm-up frame: egui hit-tests widgets by the PREVIOUS frame's
+    # rect, so a first-frame press on a fresh context finds nothing.
+    ctx.begin_frame(Egui::RawInput.new(KSCREEN, [] of Egui::Event, 0.008))
+    ctx.central_panel do |ui|
+      ui.code_editor(b, focus_id: "t1", on_ctrl_click: jump)
+    end
+    ctx.end_frame
+    ctx.begin_frame(Egui::RawInput.new(KSCREEN,
+      [Egui::Event.key_pressed(Egui::KeyCode::LeftControl, ctrl),
+       Egui::Event.pointer_moved(pos),
+       Egui::Event.pointer_pressed(pos),
+       Egui::Event.pointer_released(pos)] of Egui::Event, 0.016))
+    ctx.central_panel do |ui|
+      ui.code_editor(b, focus_id: "t1", on_ctrl_click: jump)
+    end
+    ctx.end_frame
+    # Without the fix the cell was re-clobbered with the click caret
+    # (the MAX word on line 2, offset 14); the jump owes the caret
+    # line 0 col 0.
+    Kodkod::CodeEditor.cursor_offset(ctx, "t1").should eq(0)
+  end
+end

@@ -138,7 +138,12 @@ module Kodkod
       # Below the window chrome — the borderless frame's title/tab bar
       # plus the menu bar — so the panel doesn't overlap them.
       anchor = Egui::Pos2.new(screen.center.x - WIDTH / 2.0, screen.top + 120.0)
-      ctx.popup(POPUP_ID, anchor, width: WIDTH) do |ui|
+      # A touch lighter than the editor behind it (fade_color is
+      # theme-aware: ×1.1 on dark, 10% toward white on light) — the
+      # panel reads as floating above the code instead of blending in.
+      v = ctx.style.visuals
+      panel_fill = v.fade_color(v.window_fill, v.dark ? 1.1 : 0.9)
+      ctx.popup(POPUP_ID, anchor, width: WIDTH, fill: panel_fill) do |ui|
         # Sublime's query line: flat, frameless, the panel's full width
         # — not a boxed form field. `add_sized` stretches the edit
         # across the panel (its natural size is just the typed text);

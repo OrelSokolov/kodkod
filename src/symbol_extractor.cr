@@ -52,6 +52,20 @@ module Kodkod
     C_FUNC_LINE = /^\s*[A-Za-z_][A-Za-z0-9_:<>,\*\s\[\]&]*?\s([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{]*\)\s*\{/
     C_NOT_FUNC  = {"if", "for", "while", "switch", "return", "sizeof", "foreach"}
 
+    # Constants. Crystal/Ruby: any uppercase-start assignment (type
+    # aliases `Config = ...` and enum members `RED = 1` included). The
+    # `(?!=)` lookahead keeps `X == y` comparisons out; `+=`-style is
+    # excluded by the line-start anchor. Python/JS go strict
+    # UPPER_SNAKE (any-case assignment would drown the index in
+    # locals). C: enum members (`RED = 1,` / `GREEN,`).
+    CONST_LINE     = /^\s*([A-Z][A-Za-z0-9_]*)\s*=(?!=)/
+    UPPER_CONST    = /^\s*([A-Z_][A-Z0-9_]*)\s*=(?!=)/
+    JS_CONST_LINE  = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Z][A-Z0-9_$]*)\s*=(?!=)/
+    C_ENUM_MEMBER  = /^\s*([A-Z][A-Z0-9_]+)\s*(?:=(?!=)|,\s*$)/
+    RUST_CONST     = /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+(?:mut\s+)?([A-Z][A-Za-z0-9_]*)/
+    GO_CONST       = /^\s*const\s+([A-Za-z_][A-Za-z0-9_]*)/
+    JAVA_CONST     = /\b(?:static\s+final|const|static\s+readonly)\s+(?:\S+\s+)*?([A-Z][A-Z0-9_]*)\s*=(?!=)/
+
     PATTERNS = {
       "crystal" => [
         Pat.new(DEF_LINE, :method),
@@ -59,54 +73,69 @@ module Kodkod
         # Nested first: "class App::Inner" must yield Inner, not App.
         Pat.new(/^\s*(?:class|module)\s+#{IDENT}(?:::|\s+)(#{IDENT})/, :class),
         Pat.new(/^\s*(?:abstract\s+)?(?:class|module|struct|enum|record)\s+(#{IDENT})/, :class),
+        Pat.new(CONST_LINE, :constant),
+        # Bare enum members (GREEN on its own line inside an enum) —
+        # a lone UPPER_SNAKE word; heredoc terminators match too but
+        # die in token validation (they belong to the string token).
+        Pat.new(/^\s*([A-Z][A-Z0-9_]*)\s*$/, :constant),
       ] of Pat,
       "ruby" => [
         Pat.new(DEF_LINE, :method),
         Pat.new(/^\s*class\s+#{IDENT}(?:::|\s+)(#{IDENT})/, :class),
         Pat.new(/^\s*(?:class|module)\s+(#{IDENT})/, :class),
+        Pat.new(CONST_LINE, :constant),
       ] of Pat,
       "python" => [
         Pat.new(/^\s*(?:async\s+)?def\s+(#{IDENT})/, :method),
         Pat.new(/^\s*class\s+(#{IDENT})/, :class),
+        Pat.new(UPPER_CONST, :constant),
       ] of Pat,
       "go" => [
         Pat.new(/^\s*func\s+(?:\([^)]*\)\s*)?(#{IDENT})/, :function),
         Pat.new(/^\s*type\s+(#{IDENT})\s+(?:struct|interface)\b/, :type),
+        Pat.new(GO_CONST, :constant),
       ] of Pat,
       "rust" => [
         Pat.new(/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+"[^"]*"\s+)?fn\s+(#{IDENT})/, :function),
         Pat.new(/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait)\s+(#{IDENT})/, :type),
         Pat.new(/^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(#{IDENT})/, :module),
         Pat.new(/^\s*macro_rules!\s+(#{IDENT})/, :macro),
+        Pat.new(RUST_CONST, :constant),
       ] of Pat,
       "c" => [
         Pat.new(/^\s*#\s*define\s+(#{IDENT})/, :macro),
         Pat.new(/^\s*(?:typedef\s+)?struct\s+(#{IDENT})/, :type),
         Pat.new(C_FUNC_LINE, :function),
+        Pat.new(C_ENUM_MEMBER, :constant),
       ] of Pat,
       "cpp" => [
         Pat.new(/^\s*#\s*define\s+(#{IDENT})/, :macro),
         Pat.new(/^\s*(?:typedef\s+)?(?:struct|class|enum)\s+(#{IDENT})/, :type),
         Pat.new(C_FUNC_LINE, :function),
+        Pat.new(C_ENUM_MEMBER, :constant),
       ] of Pat,
       "java" => [
         Pat.new(/^\s*(?:\w+\s+)*class\s+(#{IDENT})/, :class),
         Pat.new(C_FUNC_LINE, :method),
+        Pat.new(JAVA_CONST, :constant),
       ] of Pat,
       "csharp" => [
         Pat.new(/^\s*(?:\w+\s+)*class\s+(#{IDENT})/, :class),
         Pat.new(C_FUNC_LINE, :method),
+        Pat.new(JAVA_CONST, :constant),
       ] of Pat,
       "javascript" => [
         Pat.new(/(?:^|\s)(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)/, :function),
         Pat.new(/^\s*(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/, :class),
         Pat.new(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][A-Za-z0-9_$]*\s*=>)/, :function),
+        Pat.new(JS_CONST_LINE, :constant),
       ] of Pat,
       "typescript" => [
         Pat.new(/(?:^|\s)(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)/, :function),
         Pat.new(/^\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/, :class),
         Pat.new(/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][A-Za-z0-9_$]*\s*=>)/, :function),
         Pat.new(/^\s*interface\s+([A-Za-z_$][A-Za-z0-9_$]*)/, :type),
+        Pat.new(JS_CONST_LINE, :constant),
       ] of Pat,
       "bash" => [
         Pat.new(/^\s*(?:function\s+)?(#{IDENT})\s*\(\)\s*\{/, :function),
@@ -144,7 +173,13 @@ module Kodkod
             break # first pattern wins the line (def beats class etc.)
           end
         end
-        off += line.size
+        # each_line CHOMPS the newline (["a", "bb"] for "a\nbb") — the
+        # +1 puts `off` back on the real line start, or the token
+        # lookup below drifts a char per line and reads scopes from
+        # the WRONG place (a def in code validated as string text, a
+        # heredoc sample validated as code). Overshoots only past the
+        # final line of a \n-less EOF, where no match can live.
+        off += line.size + 1
       end
       hits
     end

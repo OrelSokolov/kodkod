@@ -265,3 +265,81 @@ describe "SymbolExtractor keyword guard" do
     end
   end
 end
+
+describe "SymbolExtractor constants" do
+  it "extracts crystal constants, type aliases and enum members" do
+    code = <<-CRYSTAL
+      module Kodkod
+        VERSION = "0.1.1"
+        Config = NamedTuple(a: Int32)
+        enum Color
+          RED = 1
+          GREEN
+        end
+        def helper
+        end
+        broken = X == 1
+        count += 1
+      end
+    CRYSTAL
+    hits = hits_of(code, "crystal")
+    hits.should contain({"VERSION", :constant, 1})
+    hits.should contain({"Config", :constant, 2})
+    hits.should contain({"RED", :constant, 4})
+    hits.should contain({"GREEN", :constant, 5})
+    hits.should contain({"helper", :method, 7})
+    # Comparisons (==) and op-assignments (+=) are not constants.
+    hits.map(&.[0]).should_not contain("X")
+    hits.map(&.[0]).should_not contain("count")
+  end
+
+  it "extracts ruby constants" do
+    hits = hits_of("MAX = 10\nCount = Struct.new\nx = 1\n", "ruby")
+    hits.should contain({"MAX", :constant, 0})
+    hits.should contain({"Count", :constant, 1})
+    hits.map(&.[0]).should_not contain("x")
+  end
+
+  it "extracts python UPPER_SNAKE constants only" do
+    hits = hits_of("MAX_RETRIES = 3\nMixed = 2\nx = 1\n", "python")
+    hits.should contain({"MAX_RETRIES", :constant, 0})
+    hits.map(&.[0]).should_not contain("Mixed")
+    hits.map(&.[0]).should_not contain("x")
+  end
+
+  it "extracts rust const and static items" do
+    hits = hits_of("pub const MAX: Int32 = 10\nstatic mut COUNTER = 0\nconst fn f() {}\n", "rust")
+    hits.should contain({"MAX", :constant, 0})
+    hits.should contain({"COUNTER", :constant, 1})
+    # const fn is a FUNCTION, not a constant.
+    hits.should contain({"f", :function, 2})
+  end
+
+  it "extracts go consts and js/ts UPPER_SNAKE consts" do
+    hits_of("const Pi = 3.14\n", "go").should contain({"Pi", :constant, 0})
+    code = "export const API_URL = \"x\"\nconst arrow = (a) => a\n"
+    hits = hits_of(code, "typescript")
+    hits.should contain({"API_URL", :constant, 0})
+    hits.should contain({"arrow", :function, 1})
+  end
+
+  it "extracts c enum members in both forms" do
+    code = "enum color {\n  RED = 1,\n  GREEN,\n};\n"
+    hits = hits_of(code, "c")
+    hits.should contain({"RED", :constant, 1})
+    hits.should contain({"GREEN", :constant, 2})
+  end
+
+  it "extracts java/csharp static finals" do
+    code = "static final int MAX = 10;\nstatic final Map<String, String> CACHE = Map.of();\n"
+    hits = hits_of(code, "java")
+    hits.should contain({"MAX", :constant, 0})
+    hits.should contain({"CACHE", :constant, 1})
+  end
+
+  it "does not index constants inside strings or comments" do
+    code = "# MAX = 10\ns = \"MAX = 10\"\nMAX = 10\n"
+    hits = hits_of(code, "crystal")
+    hits.select { |h| h[2] == 2 }.should eq([{"MAX", :constant, 2}])
+  end
+end

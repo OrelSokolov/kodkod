@@ -454,8 +454,12 @@ module Kodkod
         response.request_focus
         if linkable_at?(link_spans, at)
           ctrl_cb.call(at)
-          cursor = at # a link click parks the caret on the word
-          anchor = at
+          # The callback (a go-to-definition jump) may have rewritten
+          # the caret/anchor cells for this very id — re-read them so
+          # the persist at the bottom of #ui keeps the jump, not the
+          # click position.
+          cursor = memory.data.get_int(id, at)
+          anchor = memory.data.get_int(anchor_id, at)
         elsif response.double_clicked?
           line, _col = rope.line_col_of(at)
           w0, w1 = CodeEditor.word_range(rope.line_text(line),
