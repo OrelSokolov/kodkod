@@ -53,16 +53,26 @@ module Kodkod
     ID_PREFIX    = "kodkod/code_editor/"
     FONT_MIN     = 8.0
     FONT_MAX     = 40.0
+    # Lines longer than this skip the Ctrl-link identifier scan (see
+    # the link block in #ui) — the col_x prefix measures would go
+    # quadratic on minified files.
+    LINK_SCAN_MAX_CHARS = 1_000
 
     def initialize(@buffer : EditorBuffer, @focus_id : String? = nil,
                    @keyboard : Bool = true,
                    @escape_clears_focus : Bool = true,
-                   @tab : String = "  ", @rows : Int32 = 25,
+                   @tab : String = "    ", @rows : Int32 = 25,
                    @cursor_style : Symbol = :block,
                    @cursor_blinks : Bool = true,
                    @cursor_line : Bool = true,
                    @syntax_highlight : Bool = true,
-                   @on_context_menu : (Egui::Ui ->)? = nil)
+                   @on_context_menu : (Egui::Ui ->)? = nil,
+                   # Go-to-definition hooks (see the link block in #ui):
+                   # `on_ctrl_click` receives the caret offset under a
+                   # Ctrl+click; `link_lookup` says whether a word has
+                   # indexed definitions (drives the Ctrl underlines).
+                   @on_ctrl_click : (Int32 ->)? = nil,
+                   @link_lookup : (String -> Bool)? = nil)
     end
 
     # Global (ui-scope-independent) widget id — see the file header.
@@ -234,6 +244,56 @@ module Kodkod
       ctx.memory.focus.request(widget_id(focus_id))
     end
 
+    # Land the caret at LINE (0-based), char column COL. Both clamp
+    # into the buffer: a line past the end clamps to the last line, a
+    # COL past the line's end TRIMS to the line end — each with a
+    # one-line stderr warning (the caller asked for coordinates that
+    # do not exist; silently eating them hides indexing bugs).
+    #
+    # The write also survives frames the editor does NOT render in
+    # (a jump from the Indexing page): Memory prunes unused state
+    # cells at end of frame, so the caret/scroll cells are marked
+    # used here — without that the freshly written caret cell was
+    # pruned the very frame of the jump and the cursor reset to 0.
+    def self.goto_line(ctx : Egui::Context, buffer : EditorBuffer,
+                       focus_id : String, line : Int32,
+                       col : Int32 = 0) : Nil
+      rope = buffer.rope
+      li = line.clamp(0, {rope.line_count - 1, 0}.max)
+      if li != line
+        STDERR.puts "kodkod: goto_line line #{line} out of range " \
+                    "(0..#{ {rope.line_count - 1, 0}.max }) — clamped to #{li}"
+      end
+      len = rope.line_length(li)
+      ci = col.clamp(0, len)
+      if ci != col
+        STDERR.puts "kodkod: goto_line col #{col} past line end " \
+                    "(#{len}) — trimmed to #{ci}"
+      end
+      id = widget_id(focus_id)
+      ctx.memory.use_id(id)
+      ctx.memory.use_id(id.child(ANCHOR_SALT))
+      ctx.memory.use_id(id.child(COL_SALT))
+      ctx.memory.use_id(id.child(SEEN_SALT))
+      ctx.memory.use_id(id.child(SCROLL_SALT))
+      set_cursor(ctx, buffer, focus_id, li, ci)
+      scroll_to_line(ctx, focus_id, li, center: true)
+    end
+
+    # The identifier (word) around `offset`, as {start, end} char
+    # offsets into the rope — the app's go-to-definition lookup scope.
+    # nil when the offset sits on no identifier.
+    def self.word_at(rope : Rope, offset : Int32) : {Int32, Int32}?
+      offset = offset.clamp(0, rope.size)
+      line, col = rope.line_col_of(offset)
+      text = rope.line_text(line)
+      return nil if text.empty?
+      w0, w1 = CodeEditor.word_range(text, col.clamp(0, text.size - 1))
+      return nil if w1 <= w0
+      s = rope.line_start(line)
+      {s + w0, s + w1}
+    end
+
     # --- widget ------------------------------------------------------
 
     def ui(ui : Egui::Ui) : Egui::Response
@@ -380,13 +440,39 @@ module Kodkod
       edited = false
 
       # --- mouse: click places the caret, drag selects ----------------
-      if response.pressed? || response.clicked?
+      # A Ctrl+click with go-to-definition armed is a LINK click: the
+      # app resolves the word under the pointer (jump or candidates)
+      # and the caret/selection stay where they were — like every
+      # browser/IDE link. Words in PROSE tokens (comments, strings)
+      # are not links — the same gate the underline layer uses — so a
+      # Ctrl+click there degrades to a normal caret placement.
+      link_spans = @syntax_highlight ? @buffer.token_spans : nil
+      if (ctrl_cb = @on_ctrl_click) && input.modifiers.ctrl &&
+         (response.pressed? || response.clicked?) && (pos = input.pointer_pos)
+        at = caret_at(inner, pos, v_off, h_off, fonts, font_size,
+          line_h, rope)
+        response.request_focus
+        if linkable_at?(link_spans, at)
+          ctrl_cb.call(at)
+          cursor = at # a link click parks the caret on the word
+          anchor = at
+        elsif response.double_clicked?
+          line, _col = rope.line_col_of(at)
+          w0, w1 = CodeEditor.word_range(rope.line_text(line),
+            at - rope.line_start(line))
+          cursor = rope.line_start(line) + w0
+          anchor = rope.line_start(line) + w1
+        else
+          cursor = at
+          anchor = at
+        end
+      elsif response.pressed? || response.clicked?
         response.request_focus
         if (pos = input.pointer_pos)
           at = caret_at(inner, pos, v_off, h_off, fonts, font_size, line_h, rope)
           if response.double_clicked?
             line, _col = rope.line_col_of(at)
-            w0, w1 = word_range(rope.line_text(line), at - rope.line_start(line))
+            w0, w1 = CodeEditor.word_range(rope.line_text(line), at - rope.line_start(line))
             cursor = rope.line_start(line) + w0
             anchor = rope.line_start(line) + w1
           else
@@ -412,6 +498,11 @@ module Kodkod
       end
       if @keyboard && response.has_focus?
         ui.ctx.memory.focus.lock_arrows(horizontal: true, vertical: true)
+        # A textarea owns its Tab: focus navigation (Memory#navigate_focus)
+        # runs BEFORE any widget renders and consumes the Tab keypress
+        # unless the focused widget claims the whole keyboard — the Tab
+        # branch in handle_keyboard would never fire without this lock.
+        ui.ctx.memory.focus.lock_keyboard
         cursor, anchor, edited = handle_keyboard(ui.ctx, cursor, anchor,
           view_h, line_h, col_id)
         ui.ctx.request_repaint if @cursor_blinks # caret blink
@@ -627,6 +718,68 @@ module Kodkod
 
       painter.paint_galley(inner.min - Egui::Vec2.new(h_off, v_off),
         galley, fonts, visuals.text_color, "monospace")
+
+      # --- Ctrl link highlighting (go-to-definition) -------------------
+      # While Ctrl is held, every identifier in view with indexed
+      # definitions gets a hyperlink underline, and the pointer over
+      # one of them turns into the pointing hand. Token-AWARE: the
+      # scan walks the highlight.cr spans (binary search per visible
+      # line, same as the row builder) and skips PROSE tokens —
+      # comments, strings, regexps — where an indexed word is just a
+      # word, not a reference (the old raw-text scan underlined them
+      # everywhere: mass false positives in comments). Without spans
+      # (unknown language, huge file, highlighting off) it degrades to
+      # the raw per-line scan — name-based nav still beats nothing.
+      # One hash probe per identifier run per frame; monster lines
+      # skip the scan (a minified 27k-char line must not pay quadratic
+      # col_x measures for underline x-positions).
+      if (ll = @link_lookup) && input.modifiers.ctrl
+        if response.hovered? && (pos = input.pointer_pos)
+          at = caret_at(inner, pos, v_off, h_off, fonts, font_size,
+            line_h, rope)
+          line, col = rope.line_col_of(at)
+          text = rope.line_text(line)
+          w0, w1 = CodeEditor.word_range(text, col.clamp(0, text.size - 1))
+          if w1 > w0 && ll.call(text[w0...w1]) &&
+             linkable_at?(link_spans, at)
+            ui.ctx.set_cursor_icon(Egui::CursorIcon::Pointer)
+          end
+        end
+        (lv0...k1).each do |li|
+          text = rope.line_text(li)
+          next if text.size > LINK_SCAN_MAX_CHARS
+          s = rope.line_start(li)
+          line_end = s + text.size
+          if (sp = link_spans)
+            starts, toks = sp
+            lo = 0
+            hi = toks.size
+            while lo < hi # first token whose END is past the line start
+              mid = (lo + hi) // 2
+              if starts[mid + 1] > s
+                hi = mid
+              else
+                lo = mid + 1
+              end
+            end
+            i = lo
+            while i < toks.size && starts[i] < line_end
+              frag_s = {starts[i], s}.max
+              frag_e = {starts[i + 1], line_end}.min
+              if Syntax.linkable_scope?(toks[i].scope) && frag_e > frag_s
+                underline_runs(text, frag_s - s, frag_e - s, ll, li,
+                  inner, h_off, v_off, line_h, row_ascent, fonts,
+                  font_size, painter, visuals.hyperlink_color)
+              end
+              i += 1
+            end
+          else
+            underline_runs(text, 0, text.size, ll, li, inner, h_off,
+              v_off, line_h, row_ascent, fonts, font_size, painter,
+              visuals.hyperlink_color)
+          end
+        end
+      end
 
       # Caret while focused; it BLINKS unless `cursor_blinks: false`
       # holds it steady (VIM's cursor never blinks).
@@ -1001,6 +1154,62 @@ module Kodkod
       {runs, acc}
     end
 
+    # Underline the identifier runs of text[from, to) whose words the
+    # link lookup resolves — the Ctrl-link layer's paint pass (see
+    # #ui). Runs are char columns on the line; positions come from the
+    # MEASURED prefix widths (col_x) and are clipped to the viewport.
+    private def underline_runs(text : String, from : Int32, to : Int32,
+                               ll : String -> Bool, li : Int32,
+                               inner : Egui::Rect, h_off : Float64,
+                               v_off : Float64, line_h : Float64,
+                               row_ascent : Float64,
+                               fonts : Egui::Fonts, font_size : Float64,
+                               painter : Egui::Painter,
+                               link_color : Egui::Color32) : Nil
+      col = from
+      while col < to
+        if CodeEditor.word_char?(text[col])
+          s = col
+          while col < to && CodeEditor.word_char?(text[col])
+            col += 1
+          end
+          word = text[s...col]
+          next unless ll.call(word)
+          x0 = inner.min.x + col_x(text, s, fonts, font_size) - h_off
+          x1 = x0 + fonts.measure(word, font_size).x
+          next if x1 < inner.min.x || x0 > inner.max.x
+          baseline = inner.min.y + li.to_f64 * line_h - v_off +
+                     row_ascent
+          painter.line(Egui::Pos2.new(x0, baseline + 2.0),
+            Egui::Pos2.new(x1, baseline + 2.0), 1.0, link_color)
+        else
+          col += 1
+        end
+      end
+    end
+
+    # Whether `offset` sits in a token a Ctrl-link may act on (prose
+    # tokens — comments, strings — say no; no spans → allow, the
+    # raw-text fallback matches the underline layer).
+    private def linkable_at?(spans : {Array(Int32), Array(Syntax::Token)}?,
+                             offset : Int32) : Bool
+      return true unless (sp = spans)
+      starts, toks = sp
+      lo = 0
+      hi = toks.size # last token with starts[i] <= offset
+      while lo < hi
+        mid = (lo + hi) // 2
+        if starts[mid] <= offset
+          lo = mid + 1
+        else
+          hi = mid
+        end
+      end
+      i = lo - 1
+      return true if i < 0
+      Syntax.linkable_scope?(toks[i].scope)
+    end
+
     # Nearest caret char offset at a pointer position (screen coords).
     # The column is found against MEASURED cell boundaries (binary
     # search, then snapped to the nearest edge).
@@ -1031,9 +1240,10 @@ module Kodkod
       rope.offset_at(line, col)
     end
 
-    # Word around `col` on a line for double-click selection — returns
-    # char columns {start, end_exclusive} (same classes as TextArea).
-    private def word_range(text : String, pos : Int32) : {Int32, Int32}
+    # Word around `col` on a line for double-click selection (and the
+    # go-to-definition word_at) — returns char columns
+    # {start, end_exclusive} (same classes as TextArea).
+    def self.word_range(text : String, pos : Int32) : {Int32, Int32}
       return {0, text.size} if text.empty?
       pos = pos.clamp(0, text.size - 1)
       l = pos
@@ -1047,13 +1257,18 @@ module Kodkod
       {l, r + 1}
     end
 
-    private def same_word_class?(a : Char, b : Char) : Bool
+    private def self.same_word_class?(a : Char, b : Char) : Bool
       word_char?(a) && word_char?(b) ||
         !word_char?(a) && !word_char?(b) && a == b
     end
 
-    private def word_char?(ch : Char) : Bool
-      ch.ascii_letter? || ch.ascii_number?
+    def self.word_char?(ch : Char) : Bool
+      # `_` is part of an identifier: snake_case names (about_click,
+      # word_char?) must survive as ONE word for the double-click
+      # selection, the Ctrl-link scan and word_at's go-to-definition
+      # lookup — splitting on the underscore left "about_click"
+      # unresolved even though the index had it.
+      ch.ascii_letter? || ch.ascii_number? || ch == '_'
     end
   end
 end
@@ -1063,15 +1278,18 @@ class Egui::Ui
   def code_editor(buffer : Kodkod::EditorBuffer, focus_id : String? = nil,
                   keyboard : Bool = true,
                   escape_clears_focus : Bool = true,
-                  tab : String = "  ",
+                  tab : String = "    ",
                   rows : Int32 = 25,
                   cursor_style : Symbol = :block,
                   cursor_blinks : Bool = true,
                   cursor_line : Bool = true,
                   syntax_highlight : Bool = true,
-                  on_context_menu : (Egui::Ui ->)? = nil) : Egui::Response
+                  on_context_menu : (Egui::Ui ->)? = nil,
+                  on_ctrl_click : (Int32 ->)? = nil,
+                  link_lookup : (String -> Bool)? = nil) : Egui::Response
     add(Kodkod::CodeEditor.new(buffer, focus_id, keyboard,
       escape_clears_focus, tab, rows, cursor_style, cursor_blinks,
-      cursor_line, syntax_highlight, on_context_menu))
+      cursor_line, syntax_highlight, on_context_menu, on_ctrl_click,
+      link_lookup))
   end
 end

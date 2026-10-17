@@ -180,3 +180,28 @@ describe Kodkod::Syntax do
     elapsed.total_seconds.should be < 5.0 # generous bound for a debug build
   end
 end
+
+describe "Crystal %-literals" do
+  it "tokenizes %w[] word arrays as strings" do
+    toks = Kodkod::Syntax.highlight(<<-CRYSTAL, "crystal").not_nil!
+      words = %w[
+        def end if
+      ]
+    CRYSTAL
+    # The words inside the literal are ONE string token run — not
+    # keywords. Join coverage still holds (checked by the invariant
+    # above for the general case).
+    strings = toks.select { |t| t.scope == "string" }
+    strings.map(&.text).join.should contain("def end if")
+    toks.select { |t| t.scope == "keyword" }.map(&.text.strip)
+      .should_not contain("def")
+  end
+
+  it "handles the paired and same-char delimiters" do
+    {% for pair in {"%w(one two)", "%i[one]", "%q{one}", "%Q<one>", "%(one)", "%r|one|"} %}
+      toks = Kodkod::Syntax.highlight({{ pair }} + "\n", "crystal").not_nil!
+      toks.any? { |t| t.text.includes?("one") && %w[string regexp].includes?(t.scope) }
+        .should be_true
+    {% end %}
+  end
+end

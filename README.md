@@ -65,6 +65,7 @@ archives; other builds upload the same files as workflow artifacts.
 | Ctrl+W / Ctrl+Q | close tab / quit |
 | Ctrl+Tab / Ctrl+Shift+Tab | next / previous tab |
 | Ctrl+F | find (Enter/Shift+Enter = next/prev) |
+| Ctrl+click | go to definition (project index; Ctrl underlines resolvable words — code tokens only, not comments/strings) |
 | Ctrl+Comma | settings (font size, theme, hidden files…) |
 | F5 | refresh explorer |
 | Ctrl+Alt+V | toggle VIM mode |
@@ -92,6 +93,14 @@ src/
   file_tree.cr       lazy-loading directory tree
   quick_open.cr      Sublime-style Ctrl+P fuzzy file finder
                       (fuzzy.cr is the scorer)
+  event_bus.cr       tiny pub/sub: fs events → index queue → UI
+  gitignore.cr       .gitignore parser/matcher for the index walk
+  symbol_extractor.cr regex-level definitions (def/class/macro…)
+  symbol_index.cr    in-memory name → definitions database
+  index_queue.cr     per-folder indexing jobs, gitignore-aware walk
+  def_popup.cr       the ambiguous go-to-definition chooser popup
+  symbol_browser.cr  the Indexing page's filterable definitions table
+                      (virtualized; query matches name OR file)
   file_viewer.cr     the image tab: PNG (stb_image) / SVG (NanoSVG),
                      wheel zoom, drag pan, double-click refits
   rope.cr            the text buffer (piece-free rope; huge files)

@@ -103,8 +103,7 @@ module Kodkod
         # :123 — goto line; not a named command.
         if stripped.matches?(/\A\d+\z/)
           goto = {stripped.to_i - 1, 0}.max
-          CodeEditor.set_cursor(ctx, buffer, focus_id, goto, 0)
-          CodeEditor.scroll_to_line(ctx, focus_id, goto, center: true)
+          CodeEditor.goto_line(ctx, buffer, focus_id, goto, 0)
           @last_message = nil
           return
         end

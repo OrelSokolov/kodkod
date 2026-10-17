@@ -45,6 +45,25 @@ module Kodkod
           end: Regex.new("^[ \\t]*[A-Z_]+\\w*$", :multiline)
         )
 
+        # %-literals: %w[...] %i(...) %q{...} %Q<...> %( ... ) and the
+        # same-char delimiter forms, ruby-grammar style (crystal has
+        # the same literals; %r is a regexp literal). Without these
+        # the words inside a %w[def end if] array keyword-ized as
+        # CODE — the project indexer then honestly found a "def end"
+        # definition inside a literal (see SymbolExtractor's token
+        # validation).
+        percent_lits = ['(', '[', '{', '<', '/', '|', '%', '-'].flat_map do |open|
+          close = {'(' => ')', '[' => ']', '{' => '}', '<' => '>'}[open]? || open
+          [{"%[qQiIwWx]?\\#{open}", close, "string"},
+           {"%r\\#{open}", close, "regexp"}].map do |begin_p, close_p, scope|
+            Highlight::Mode.new.apply(
+              scope: scope,
+              begin: Regex.new(begin_p),
+              end: Regex.new("\\#{close_p}")
+            )
+          end
+        end
+
         Highlight::Mode.new.apply(
           name: "Crystal",
           aliases: ["cr"],
@@ -54,6 +73,7 @@ module Kodkod
             dquote,
             squote,
             heredoc,
+          ] of Highlight::Mode + percent_lits + [
             Highlight::Mode.new.apply(
               scope: "symbol",
               match: /:[a-zA-Z_]\w*[?!]?/

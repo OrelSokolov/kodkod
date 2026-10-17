@@ -91,6 +91,13 @@ describe Kodkod::CodeEditor do
       events: [Egui::Event.key_pressed(Egui::KeyCode::Enter)],
       time: 0.048)
     b.text.should eq("  def foo\n  ")
+    # Tab must INSERT, not cycle focus: navigate_focus consumes the
+    # keypress before widgets render unless the focused editor locked
+    # the keyboard (the frame above latched the lock for this one).
+    editor_frame(ctx, b,
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Tab)],
+      time: 0.064)
+    b.text.should eq("  def foo\n      ") # indent + 4-space default tab
   end
 
   it "undoes and redoes through the class API" do
@@ -394,5 +401,144 @@ describe "CodeEditor font zoom (VIM normal: widget keyboard off)" do
     editor_frame(ctx, b, keyboard: false,
       events: [Egui::Event.key_pressed(Egui::KeyCode::Minus, ctrl)])
     ctx.memory.data.get_f64(cell).should eq(15.0)
+  end
+end
+
+describe "CodeEditor go-to-definition links" do
+  it "word_at keeps snake_case identifiers whole" do
+    b = Kodkod::EditorBuffer.new("def about_click\nend\n")
+    rope = b.rope
+    # Click anywhere inside the word: offsets 4..15.
+    (4..15).each do |off|
+      wr = Kodkod::CodeEditor.word_at(rope, off).not_nil!
+      rope.slice(wr[0], wr[1] - wr[0]).should eq("about_click")
+    end
+    # The keyword next to it still resolves as its own word.
+    (0..2).each do |off|
+      wr = Kodkod::CodeEditor.word_at(rope, off).not_nil!
+      rope.slice(wr[0], wr[1] - wr[0]).should eq("def")
+    end
+  end
+
+  it "underlines indexed words while Ctrl is held" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("def about_click\nend\n")
+    seen = [] of String
+    look = ->(w : String) { seen << w; w == "about_click" }
+    ctrl = Egui::Modifiers.new(ctrl: true)
+    ctx.begin_frame(Egui::RawInput.new(KSCREEN,
+      [Egui::Event.key_pressed(Egui::KeyCode::LeftControl, ctrl)], 0.016))
+    ctx.central_panel do |ui|
+      ui.code_editor(b, focus_id: "t1", link_lookup: look)
+    end
+    cmds = ctx.end_frame
+    seen.should contain("about_click")
+    link = Egui::Color32.rgba(102, 170, 255, 255) # dark theme hyperlink
+    underline = cmds.select(Egui::LineCmd).find { |l| l.color == link }
+    underline.should_not be_nil
+    underline.not_nil!.p2.x - underline.not_nil!.p1.x.should be > 50.0
+  end
+
+  it "does not underline without Ctrl" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("def about_click\nend\n")
+    look = ->(w : String) { w == "about_click" }
+    ctx.begin_frame(Egui::RawInput.new(KSCREEN, [] of Egui::Event, 0.016))
+    ctx.central_panel do |ui|
+      ui.code_editor(b, focus_id: "t1", link_lookup: look)
+    end
+    cmds = ctx.end_frame
+    link = Egui::Color32.rgba(102, 170, 255, 255)
+    cmds.select(Egui::LineCmd).any? { |l| l.color == link }.should be_false
+  end
+end
+
+describe "CodeEditor.goto_line" do
+  it "lands the caret on the requested line and column" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("alpha\nbeta gamma\ngamma\n")
+    editor_frame(ctx, b)
+    Kodkod::CodeEditor.goto_line(ctx, b, "t1", 1, 5)
+    line, col = Kodkod::CodeEditor.cursor(ctx, b, "t1")
+    line.should eq(1)
+    col.should eq(5)
+  end
+
+  it "trims a column past the line end (warning on stderr)" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("alpha\nbeta\n")
+    editor_frame(ctx, b)
+    Kodkod::CodeEditor.goto_line(ctx, b, "t1", 1, 99)
+    line, col = Kodkod::CodeEditor.cursor(ctx, b, "t1")
+    col.should eq(4) # "beta".size — trimmed
+    line.should eq(1)
+  end
+
+  it "clamps a line past the buffer end" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("alpha\nbeta\n") # trailing \n → 3rd empty line
+    editor_frame(ctx, b)
+    Kodkod::CodeEditor.goto_line(ctx, b, "t1", 500, 0)
+    Kodkod::CodeEditor.cursor(ctx, b, "t1")[0].should eq(2)
+  end
+
+  it "survives a frame the editor does not render in (pruning)" do
+    # The regression behind "jump from the Indexing page loses the
+    # caret": Memory prunes unused cells at end of frame, and the
+    # editor's cursor cell is only marked used while the widget
+    # renders. goto_line use_ids the cells itself, so a write in a
+    # frame WITHOUT the editor must persist into the next rendered
+    # frame.
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("alpha\nbeta\ngamma\n")
+    editor_frame(ctx, b) # widget exists, cells established
+    # Frame WITHOUT the editor — the jump frame on the Indexing page.
+    ctx.begin_frame(Egui::RawInput.new(KSCREEN, [] of Egui::Event, 0.05))
+    ctx.central_panel do |ui|
+      ui.label("no editor here")
+    end
+    Kodkod::CodeEditor.goto_line(ctx, b, "t1", 2, 1)
+    ctx.end_frame
+    # Next frame the editor renders again — the caret must be where
+    # goto_line put it, not reset to 0.
+    editor_frame(ctx, b, time: 0.08)
+    Kodkod::CodeEditor.cursor(ctx, b, "t1").should eq({2, 1})
+  end
+end
+
+describe "CodeEditor Ctrl links are token-aware" do
+  it "Syntax.linkable_scope? rejects prose scopes" do
+    Kodkod::Syntax.linkable_scope?(nil).should be_true
+    Kodkod::Syntax.linkable_scope?("").should be_true
+    Kodkod::Syntax.linkable_scope?("variable").should be_true
+    Kodkod::Syntax.linkable_scope?("title.function").should be_true
+    Kodkod::Syntax.linkable_scope?("property").should be_true
+    Kodkod::Syntax.linkable_scope?("comment").should be_false
+    Kodkod::Syntax.linkable_scope?("comment.line").should be_false
+    Kodkod::Syntax.linkable_scope?("string").should be_false
+    Kodkod::Syntax.linkable_scope?("doctag").should be_false
+    Kodkod::Syntax.linkable_scope?("quote").should be_false
+    Kodkod::Syntax.linkable_scope?("regexp").should be_false
+  end
+
+  it "underlines code occurrences only — not comments or strings" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new(
+      "# helper in a comment\n" \
+      "x = \"helper\"\n" \
+      "helper\n", lang: "crystal")
+    look = ->(w : String) { w == "helper" }
+    ctrl = Egui::Modifiers.new(ctrl: true)
+    ctx.begin_frame(Egui::RawInput.new(KSCREEN,
+      [Egui::Event.key_pressed(Egui::KeyCode::LeftControl, ctrl)], 0.016))
+    ctx.central_panel do |ui|
+      ui.code_editor(b, focus_id: "t1", link_lookup: look)
+    end
+    cmds = ctx.end_frame
+    link = Egui::Color32.rgba(102, 170, 255, 255)
+    underlines = cmds.select(Egui::LineCmd).select { |l| l.color == link }
+    # ONE underline: the bare `helper` on line 3. The comment (line 1)
+    # and the string (line 2) hold the same word but are prose.
+    underlines.size.should eq(1)
   end
 end

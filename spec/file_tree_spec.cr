@@ -27,7 +27,8 @@ def key_frame(ctx : Egui::Context, dir : String, keys : Array(Egui::KeyCode),
   ctx.begin_frame(raw)
   ctx.central_panel do |ui|
     ui.file_tree("x", dir, cursor: cursor, on_cursor: on_cursor) { |path|
-      on_activate.call(path) }
+      on_activate.call(path)
+    }
   end
   ctx.end_frame
 end
@@ -258,7 +259,7 @@ describe Kodkod::FileTree do
         ctx.memory.data.set_bool(root_id, true)
 
         cursor = File.join(dir, "src")
-        noop = ->(_p : String) {}
+        noop = ->(_p : String) { }
         key_frame(ctx, dir, [Egui::KeyCode::Enter], cursor) { |p| noop.call(p) }
         ctx.memory.data.get_bool(src_id, false).should be_true
         key_frame(ctx, dir, [Egui::KeyCode::Enter], cursor) { |p| noop.call(p) }
@@ -553,7 +554,6 @@ describe Kodkod::FileTree do
       end
     end
   end
-
 end
 describe "FileTree font zoom" do
   it "Ctrl+Minus/Equal zoom the tree font on hover, whole points only" do

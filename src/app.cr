@@ -18,6 +18,13 @@ require "./i18n"
 require "./reload_queue"
 require "./vim_command"
 require "./vim_mode"
+require "./event_bus"
+require "./gitignore"
+require "./symbol_index"
+require "./symbol_extractor"
+require "./index_queue"
+require "./def_popup"
+require "./symbol_browser"
 
 class KodkodApp < Egui::App
   enable_ecss "kodkod"
@@ -31,6 +38,7 @@ class KodkodApp < Egui::App
     property show_explorer : Bool = true
     property cursor_blinks : Bool = true
     property syntax_highlight : Bool = true
+    property goto_def : Bool = true
     property language : String = "en"
 
     def initialize(@theme : String = "Dark", @vim : Bool = true,
@@ -38,6 +46,7 @@ class KodkodApp < Egui::App
                    @show_explorer : Bool = true,
                    @cursor_blinks : Bool = true,
                    @syntax_highlight : Bool = true,
+                   @goto_def : Bool = true,
                    @language : String = "en")
     end
   end
@@ -47,48 +56,48 @@ class KodkodApp < Egui::App
   # Extension → syntax registry name (Syntax.highlight key). Files
   # outside the map fall through to LANG_BY_NAME below.
   LANG_BY_EXT = {
-    ".cr"  => "crystal", ".rb" => "ruby",
+    ".cr" => "crystal", ".rb" => "ruby",
     ".rake" => "ruby", ".ru" => "ruby", ".gemspec" => "ruby",
     ".jbuilder" => "ruby",
     ".erb" => "erb",
-    ".c"   => "c", ".h" => "c",
+    ".c" => "c", ".h" => "c",
     ".cpp" => "cpp", ".hpp" => "cpp", ".cc" => "cpp",
-    ".hh"  => "cpp", ".cxx" => "cpp", ".hxx" => "cpp",
-    ".cs"  => "csharp",
+    ".hh" => "cpp", ".cxx" => "cpp", ".hxx" => "cpp",
+    ".cs" => "csharp",
     ".css" => "css", ".scss" => "scss", ".less" => "less",
     ".diff" => "diff", ".patch" => "diff",
-    ".go"  => "go", ".graphql" => "graphql", ".gql" => "graphql",
+    ".go" => "go", ".graphql" => "graphql", ".gql" => "graphql",
     ".ini" => "ini", ".toml" => "ini",
     ".java" => "java", ".kt" => "kotlin", ".kts" => "kotlin",
     ".lua" => "lua", ".m" => "objectivec", ".mm" => "objectivec",
-    ".pl"  => "perl", ".pm" => "perl",
+    ".pl" => "perl", ".pm" => "perl",
     ".php" => "php", ".phtml" => "php-template",
-    ".py"  => "python", ".pyi" => "python",
-    ".r"   => "r", ".rs" => "rust",
+    ".py" => "python", ".pyi" => "python",
+    ".r" => "r", ".rs" => "rust",
     ".sql" => "sql", ".swift" => "swift", ".vb" => "vbnet",
-    ".ts"  => "typescript", ".mts" => "typescript",
+    ".ts" => "typescript", ".mts" => "typescript",
     ".wat" => "wasm",
     ".xml" => "xml", ".html" => "xml", ".htm" => "xml", ".svg" => "xml",
     ".xhtml" => "xml", ".xsl" => "xml", ".xsd" => "xml",
     ".rss" => "xml", ".atom" => "xml",
     ".json" => "json",
     ".yml" => "yaml", ".yaml" => "yaml",
-    ".md"  => "markdown", ".markdown" => "markdown", ".mkd" => "markdown",
-    ".mk"  => "makefile", ".mak" => "makefile",
-    ".sh"  => "bash", ".bash" => "bash", ".zsh" => "bash",
-    ".js"  => "javascript", ".mjs" => "javascript",
+    ".md" => "markdown", ".markdown" => "markdown", ".mkd" => "markdown",
+    ".mk" => "makefile", ".mak" => "makefile",
+    ".sh" => "bash", ".bash" => "bash", ".zsh" => "bash",
+    ".js" => "javascript", ".mjs" => "javascript",
     ".cjs" => "javascript",
   }
 
   # Well-known extensionless filenames → syntax registry name. Matched
   # case-insensitively on the basename after LANG_BY_EXT misses.
   LANG_BY_NAME = {
-    "makefile"     => "makefile",
-    "gnumakefile"  => "makefile",
-    "bsdmakefile"  => "makefile",
-    "rakefile"     => "ruby",
-    "gemfile"      => "ruby",
-    "vagrantfile"  => "ruby",
+    "makefile"    => "makefile",
+    "gnumakefile" => "makefile",
+    "bsdmakefile" => "makefile",
+    "rakefile"    => "ruby",
+    "gemfile"     => "ruby",
+    "vagrantfile" => "ruby",
   }
 
   TEXT_MIME_EXTRAS = {"application/json", "application/xml",
@@ -178,6 +187,31 @@ class KodkodApp < Egui::App
   @caption_dark : Bool? = nil
   @search_open = false
   @search = ""
+  # --- project index (go-to-definition) -----------------------------
+  # The bus decouples the fs watcher and the index worker from the UI
+  # (see EventBus/IndexQueue); @index is the shared definition base;
+  # @def_popup picks between ambiguous jump targets. The folder watch
+  # (one recursive FSWatch on the workspace root) feeds changes into
+  # the queue through "index.fs" events.
+  @bus : Kodkod::EventBus = Kodkod::EventBus.new
+  @index : Kodkod::SymbolIndex = Kodkod::SymbolIndex.new
+  @index_queue : Kodkod::IndexQueue
+  @def_popup : Kodkod::DefPopup = Kodkod::DefPopup.new
+  @symbol_browser : Kodkod::SymbolBrowser
+  @folder_watch : FSWatch::Watch? = nil
+  # A jump's "make the caret VISIBLE" order: the focus request is a
+  # one-frame latch and the editor may not even render in the jump's
+  # frame (the Indexing page), so the target focus_id waits here and
+  # the request fires in the first frame that actually renders that
+  # editor (see the central panel). Without it a jump into the
+  # ALREADY-ACTIVE tab left the editor unfocused — no caret on screen.
+  @pending_focus_fid : String? = nil
+  # The jump's coordinates, re-asserted the same way: goto_line marks
+  # its memory cells used for ONE frame, but a jump that lands outside
+  # a rendered editor frame (or with more page-frames in between)
+  # would have its caret cell pruned back to 0. The central panel
+  # re-applies the goto in the frame the editor renders in.
+  @pending_goto : {String, Int32, Int32}? # {focus_id, line, col}
   @settings : Settings = Egui::SystemPorts::AppConfig.load(
     "kodkod", Settings.new)
   @i18n : Kodkod::I18n = Kodkod::I18n.new
@@ -200,20 +234,41 @@ class KodkodApp < Egui::App
 
     # When the Ctrl+P panel closes, the active editor takes focus back
     # (the query field held it).
-    @quick_open.on_close = ->{
+    @quick_open.on_close = -> {
+      if (doc = @docs[selected]?) && (fid = doc.focus_id)
+        Kodkod::CodeEditor.request_focus(ctx, fid)
+      end
+    }
+    # Same for the go-to-definition candidates popup.
+    @def_popup.on_close = -> {
       if (doc = @docs[selected]?) && (fid = doc.focus_id)
         Kodkod::CodeEditor.request_focus(ctx, fid)
       end
     }
 
+    # The project index: watcher → bus → queue → index → repaint. The
+    # subscriptions run on whichever fiber emits (safe cooperatively —
+    # handlers only touch state and request a repaint, never yield).
+    @index_queue = Kodkod::IndexQueue.new(@index, @bus,
+      ->lang_for(String))
+    @symbol_browser = Kodkod::SymbolBrowser.new(@index)
+    @bus.on("index.updated") { |_| ctx.request_repaint }
+    @bus.on("queue.changed") do |_|
+      ctx.request_repaint
+      unless @index_queue.busy? || @index.def_count.zero?
+        @status = t("status.index_done", defs: @index.def_count,
+          files: @index.files_indexed)
+      end
+    end
+
     Egui::WindowFrame.caption(
       height: Egui::TitleBarTabs::CAPTION_H) do |ctx, area|
-      unless ctx.router.current.page == "settings"
+      unless ctx.router.current.page.in?({"settings", "indexing"})
         Egui::TitleBarTabs.show(ctx, area, @docs.map(&.title), selected,
           dirty: @docs.map(&.dirty?),
           on_select: ->(t : Int32) { self.selected = t; nil },
           on_close: ->(t : Int32) { request_close(@docs[t]?) },
-          on_new: ->{ new_doc },
+          on_new: -> { new_doc },
           on_context_menu: ->(tab : Int32, menu : Egui::Ui) {
             tab_context_menu(tab, menu)
             nil
@@ -223,6 +278,7 @@ class KodkodApp < Egui::App
 
     if dir && Dir.exists?(dir)
       @folder = File.expand_path(dir)
+      start_indexing(@folder.not_nil!)
     end
     if files.empty?
       @docs << make_doc(Kodkod::EditorBuffer.new(
@@ -240,37 +296,37 @@ class KodkodApp < Egui::App
   end
 
   # App actions (menus and hotkeys reference these, never key strings).
-  ACTION_NEW         = Egui::HotkeyAction.new("kodkod.new")
-  ACTION_OPEN        = Egui::HotkeyAction.new("kodkod.open")
-  ACTION_OPEN_FOLDER = Egui::HotkeyAction.new("kodkod.open_folder")
-  ACTION_SAVE        = Egui::HotkeyAction.new("kodkod.save")
-  ACTION_SAVE_AS     = Egui::HotkeyAction.new("kodkod.save_as")
-  ACTION_CLOSE       = Egui::HotkeyAction.new("kodkod.close")
-  ACTION_QUIT        = Egui::HotkeyAction.new("kodkod.quit")
-  ACTION_NEXT_TAB    = Egui::HotkeyAction.new("kodkod.next_tab")
-  ACTION_PREV_TAB    = Egui::HotkeyAction.new("kodkod.prev_tab")
-  ACTION_SETTINGS    = Egui::HotkeyAction.new("kodkod.settings")
-  ACTION_SEARCH      = Egui::HotkeyAction.new("kodkod.search")
-  ACTION_QUICK_OPEN  = Egui::HotkeyAction.new("kodkod.quick_open")
-  ACTION_REFRESH     = Egui::HotkeyAction.new("kodkod.refresh")
-  ACTION_TOGGLE_VIM  = Egui::HotkeyAction.new("kodkod.toggle_vim")
+  ACTION_NEW             = Egui::HotkeyAction.new("kodkod.new")
+  ACTION_OPEN            = Egui::HotkeyAction.new("kodkod.open")
+  ACTION_OPEN_FOLDER     = Egui::HotkeyAction.new("kodkod.open_folder")
+  ACTION_SAVE            = Egui::HotkeyAction.new("kodkod.save")
+  ACTION_SAVE_AS         = Egui::HotkeyAction.new("kodkod.save_as")
+  ACTION_CLOSE           = Egui::HotkeyAction.new("kodkod.close")
+  ACTION_QUIT            = Egui::HotkeyAction.new("kodkod.quit")
+  ACTION_NEXT_TAB        = Egui::HotkeyAction.new("kodkod.next_tab")
+  ACTION_PREV_TAB        = Egui::HotkeyAction.new("kodkod.prev_tab")
+  ACTION_SETTINGS        = Egui::HotkeyAction.new("kodkod.settings")
+  ACTION_SEARCH          = Egui::HotkeyAction.new("kodkod.search")
+  ACTION_QUICK_OPEN      = Egui::HotkeyAction.new("kodkod.quick_open")
+  ACTION_REFRESH         = Egui::HotkeyAction.new("kodkod.refresh")
+  ACTION_TOGGLE_VIM      = Egui::HotkeyAction.new("kodkod.toggle_vim")
   ACTION_TOGGLE_EXPLORER = Egui::HotkeyAction.new("kodkod.toggle_explorer")
 
   DEFAULT_BINDINGS = {
-    ACTION_NEW         => "Ctrl+N",
-    ACTION_OPEN        => "Ctrl+O",
-    ACTION_OPEN_FOLDER => "Ctrl+Shift+O",
-    ACTION_SAVE        => "Ctrl+S",
-    ACTION_SAVE_AS     => "Ctrl+Shift+S",
-    ACTION_CLOSE       => "Ctrl+W",
-    ACTION_QUIT        => "Ctrl+Q",
-    ACTION_NEXT_TAB    => "Ctrl+Tab",
-    ACTION_PREV_TAB    => "Ctrl+Shift+Tab",
-    ACTION_SETTINGS    => "Ctrl+Comma",
-    ACTION_SEARCH      => "Ctrl+F",
-    ACTION_QUICK_OPEN  => "Ctrl+P",
-    ACTION_REFRESH     => "F5",
-    ACTION_TOGGLE_VIM  => "Ctrl+Alt+V",
+    ACTION_NEW             => "Ctrl+N",
+    ACTION_OPEN            => "Ctrl+O",
+    ACTION_OPEN_FOLDER     => "Ctrl+Shift+O",
+    ACTION_SAVE            => "Ctrl+S",
+    ACTION_SAVE_AS         => "Ctrl+Shift+S",
+    ACTION_CLOSE           => "Ctrl+W",
+    ACTION_QUIT            => "Ctrl+Q",
+    ACTION_NEXT_TAB        => "Ctrl+Tab",
+    ACTION_PREV_TAB        => "Ctrl+Shift+Tab",
+    ACTION_SETTINGS        => "Ctrl+Comma",
+    ACTION_SEARCH          => "Ctrl+F",
+    ACTION_QUICK_OPEN      => "Ctrl+P",
+    ACTION_REFRESH         => "F5",
+    ACTION_TOGGLE_VIM      => "Ctrl+Alt+V",
     ACTION_TOGGLE_EXPLORER => "Ctrl+Shift+E",
   }
 
@@ -349,6 +405,9 @@ class KodkodApp < Egui::App
           end
           bar.menu_button(t("menu.settings")) do |menu|
             menu.menu_item(t("menu.settings_open"), ACTION_SETTINGS)
+            menu.menu_item(t("menu.indexing")) do
+              ctx.router.navigate("root/indexing")
+            end
             menu.menu_item("#{@vim.enabled? ? "✓ " : ""}#{t("menu.vim")}",
               ACTION_TOGGLE_VIM)
             menu.menu_item("#{@show_fps ? "✓ " : ""}#{t("menu.fps")}") do
@@ -420,6 +479,11 @@ class KodkodApp < Egui::App
               viewer.show(editor)
             else
               buffer = active.buffer?.not_nil!
+              # Go-to-definition hooks: live only with a project open
+              # and the setting on. Built per frame so the procs see
+              # the CURRENT tab (a stale capture would jump through
+              # the wrong buffer's rope).
+              goto_on = @settings.goto_def && @folder != nil
               editor.code_editor(buffer, focus_id: active.focus_id,
                 keyboard: @vim.widget_keyboard,
                 escape_clears_focus: !@vim.enabled?,
@@ -432,6 +496,8 @@ class KodkodApp < Egui::App
                 # Off = render plain (no tokenization/measured token
                 # runs) — the long-line/minified-file escape hatch.
                 syntax_highlight: @settings.syntax_highlight,
+                on_ctrl_click: goto_on ? ->on_goto_click(Int32) : nil,
+                link_lookup: goto_on ? ->link_word?(String) : nil,
                 on_context_menu: ->(menu : Egui::Ui) {
                   # A distinct local (a captured `buffer` widens to
                   # the nilable re-binding further down this method).
@@ -454,6 +520,20 @@ class KodkodApp < Egui::App
               end
             end
             @explorer_activated = false
+
+            # A jump (Ctrl+click / candidates popup / the Indexing
+            # table) owes the target editor focus AND its caret
+            # position: the focus request is a one-frame latch, and
+            # the goto write survives only frames the editor renders
+            # in — both are re-asserted here, in the frame that
+            # actually shows the editor.
+            if (pg = @pending_goto) && (abuf = active.buffer?) &&
+               (afid = active.focus_id) && afid == pg[0]
+              Kodkod::CodeEditor.goto_line(ctx, abuf, afid, pg[1], pg[2])
+              Kodkod::CodeEditor.request_focus(ctx, afid)
+              @pending_goto = nil
+              @pending_focus_fid = nil
+            end
 
             # The VIM layer runs AFTER the widget: it reads this
             # frame's keys and writes caret cells the widget applies
@@ -490,8 +570,7 @@ class KodkodApp < Egui::App
                 path = buffer.path || buffer.name
                 # A ':' line being typed takes over the ruler spot (vim's
                 # command line sits over the Ln/Col area).
-                pos = @vim.enabled? && @vim.mode.command? \
-                  ? ":#{@vim.command}█" : t("status.ruler", line: line + 1, col: col + 1)
+                pos = @vim.enabled? && @vim.mode.command? ? ":#{@vim.command}█" : t("status.ruler", line: line + 1, col: col + 1)
                 ui.label("#{mode}   #{pos}   " \
                          "#{lang}   #{path}#{active.dirty? ? t("status.modified") : ""}")
               end
@@ -557,8 +636,87 @@ class KodkodApp < Egui::App
           @settings.syntax_highlight = !@settings.syntax_highlight
           save_settings
         end
+        if ui.selectable_label(@settings.goto_def, t("settings.goto_def")).clicked?
+          @settings.goto_def = !@settings.goto_def
+          save_settings
+        end
         ui.separator
         ui.label(t("settings.deeplink"))
+      end
+
+      # The project-indexing page: the per-folder job queue with live
+      # progress, reachable from the Settings menu (deep-linkable like
+      # root/settings). Painter-drawn progress bar — egui-cr has no
+      # progress widget.
+      r.page "root/indexing", title: t("indexing.title") do |ui|
+        ui.heading(t("indexing.title"))
+        if (root = @folder)
+          ui.label(t("indexing.root", folder: root))
+          ui.label(t("indexing.stats", defs: @index.def_count,
+            files: @index.files_indexed))
+          if @index_queue.busy?
+            if (job = @index_queue.current)
+              rel = job.folder == root ? "." : job.folder.lchop(root + "/")
+              ui.label(t("indexing.current", folder: rel,
+                done: job.done, total: job.total))
+              bar_w = 280.0
+              frac = job.total.zero? ? 1.0 : job.done.to_f64 / job.total
+              rect = ui.allocate_at_least(Egui::Vec2.new(bar_w, 8.0))
+              visuals = ui.style.visuals
+              ui.painter.rect(rect, 4.0,
+                visuals.fade_color(visuals.window_fill, 0.8))
+              ui.painter.rect(Egui::Rect.from_min_size(rect.min,
+                Egui::Vec2.new(rect.width * frac.clamp(0.0, 1.0),
+                  rect.height)), 4.0, visuals.hyperlink_color)
+            end
+          else
+            ui.label(t("indexing.idle"))
+          end
+          pending = @index_queue.pending
+          if job = @index_queue.current
+            pending = pending.reject(&.same?(job))
+          end
+          unless pending.empty?
+            ui.separator
+            ui.label(t("indexing.pending"))
+            pending.first(15).each do |j|
+              rel = j.folder == root ? "." : j.folder.lchop(root + "/")
+              dim = Egui::RichText.new("  #{rel}  (#{j.total})")
+                .color(visuals_dim(ui))
+              ui.rich(dim)
+            end
+          end
+          ui.separator
+          if ui.button(t("indexing.reindex")).clicked?
+            start_indexing(root)
+          end
+          ui.separator
+          # The debug table: every indexed definition, filterable by
+          # name OR file in one field; a row click jumps to the spot.
+          @symbol_browser.root = root
+          @symbol_browser.hint = t("indexing.search_hint")
+          @symbol_browser.empty_index = t("indexing.empty_index")
+          @symbol_browser.no_match = t("indexing.no_match")
+          @symbol_browser.rows_shown = t("indexing.rows_shown")
+          @symbol_browser.col_name = t("indexing.col_name")
+          @symbol_browser.col_kind = t("indexing.col_kind")
+          @symbol_browser.col_file = t("indexing.col_file")
+          @symbol_browser.col_line = t("indexing.col_line")
+          @symbol_browser.show(ui, root) { |d|
+            jump_to(d)
+            # The jump opened the file and set the caret, but this
+            # page is still the routed view — pop back so the editor
+            # (and the jumped-to line) is actually on screen.
+            ctx.router.back if ctx.router.current.page_id == "root/indexing"
+          }
+        else
+          ui.label(t("indexing.no_folder"))
+          if ui.button(t("explorer.open")).clicked?
+            open_folder
+          end
+        end
+        ui.separator
+        ui.label(t("indexing.hint"))
       end
 
       if @pending_close
@@ -630,7 +788,99 @@ class KodkodApp < Egui::App
       end
     end
 
+    # The go-to-definition candidates popup (open only after a Ctrl+
+    # click with several targets).
+    @def_popup.show(ctx) { |d| jump_to(d) }
+
     handle_actions(ctx)
+  end
+
+  # --- project index / go-to-definition -----------------------------
+
+  # Start (or restart) indexing for a workspace folder: the recursive
+  # watch feeds the bus, the queue builds its per-folder jobs.
+  private def start_indexing(folder : String) : Nil
+    unless (w = @folder_watch) && w.path == folder && !w.stopped?
+      @folder_watch.try(&.stop)
+      @folder_watch = FSWatch.watch(folder) { |e| on_index_fs_event(e) }
+    end
+    @index_queue.start(folder)
+    @status = t("status.index_started", folder: File.basename(folder))
+  end
+
+  # Runs on the fswatch observation fiber — never yields (same
+  # contract as on_doc_fs_event).
+  private def on_index_fs_event(event : FSWatch::Event) : Nil
+    return if event.self_removed?
+    if event.overflow?
+      @bus.emit("index.overflow")
+    else
+      @bus.emit("index.fs", event.path)
+    end
+  end
+
+  # The Ctrl-link gate: does this word have indexed definitions?
+  private def link_word?(word : String) : Bool
+    return false if word.empty?
+    @index.has_name?(word)
+  end
+
+  # A Ctrl+click landed at char `offset` in the active buffer: look
+  # the word up, jump on a unique hit, offer the popup on many, and
+  # say so on none.
+  private def on_goto_click(offset : Int32) : Nil
+    doc = @docs[selected]? || return
+    buffer = doc.buffer? || return
+    rope = buffer.rope
+    wr = Kodkod::CodeEditor.word_at(rope, offset) || return
+    word = rope.slice(wr[0], wr[1] - wr[0])
+    click_line = rope.line_col_of(offset)[0]
+    defs = defs_for(word).reject { |d|
+      d.path == doc.path && d.line == click_line
+    }
+    case defs.size
+    when 0
+      @status = t("status.no_def", word: word)
+    when 1
+      jump_to(defs.first)
+    else
+      anchor = ctx.input.pointer_pos ||
+               ctx.input.screen_rect.center
+      @def_popup.open(ctx, defs, @folder, anchor)
+    end
+  end
+
+  # Definitions matching the word, exact name first, then the
+  # Crystal/Ruby `?`/`!` predicate variants; ranked same-file first,
+  # then same-directory, capped for the popup. `doc.path` may be nil
+  # (an untitled buffer) — every definition is then "other file".
+  private def defs_for(word : String) : Array(Kodkod::SymbolIndex::Def)
+    defs = @index.lookup(word)
+    if defs.empty?
+      {"?", "!"}.each do |suffix|
+        defs = @index.lookup(word + suffix)
+        break unless defs.empty?
+      end
+    end
+    cur = @docs[selected]?.try(&.path)
+    dir = cur ? File.dirname(cur.not_nil!) : nil
+    defs.sort_by { |d|
+      {d.path == cur ? 0 : (d.path.starts_with?("#{dir}/") ? 1 : 2),
+       d.path}
+    }.first(Kodkod::DefPopup::MAX_ROWS)
+  end
+
+  # Open the definition's file and land the caret on its name.
+  private def jump_to(d : Kodkod::SymbolIndex::Def) : Nil
+    return unless open_path(d.path, existing: true)
+    if (doc = @docs.find { |x| x.path == d.path }) &&
+       (buffer = doc.buffer?) && (fid = doc.focus_id)
+      Kodkod::CodeEditor.goto_line(ctx, buffer, fid, d.line, d.col)
+      # Re-assert both in the editor's first rendered frame — see the
+      # fields' comments (frame-scoped use_id / one-frame latch).
+      @pending_goto = {fid, d.line, d.col}
+      @pending_focus_fid = fid
+    end
   end
 
   private def save_settings : Nil
@@ -640,6 +890,12 @@ class KodkodApp < Egui::App
   # Translate a UI string in the active locale (see Kodkod::I18n).
   private def t(key : String, **args) : String
     @i18n.t(key, **args)
+  end
+
+  # The dimmed-text color for informational rows on the Indexing page.
+  private def visuals_dim(ui : Egui::Ui) : Egui::Color32
+    v = ui.style.visuals
+    v.fade_color(v.text_color, 0.55)
   end
 
   private def handle_actions(ctx : Egui::Context) : Nil
@@ -702,6 +958,12 @@ class KodkodApp < Egui::App
   end
 
   private def lang_for(path : String) : String?
+    self.class.lang_for(path)
+  end
+
+  # Extension/basename → syntax language (shared by the editor tabs
+  # and the project indexer).
+  def self.lang_for(path : String) : String?
     LANG_BY_EXT[File.extname(path).downcase]? ||
       LANG_BY_NAME[File.basename(path).downcase]?
   end
@@ -779,6 +1041,7 @@ class KodkodApp < Egui::App
       if path
         @folder = path
         @status = t("status.folder", path: path)
+        start_indexing(path)
       end
     end
   end
@@ -850,7 +1113,8 @@ class KodkodApp < Egui::App
       wanted << p
       next if @file_watches.has_key?(p)
       @file_watches[p] = FSWatch.watch(p, recursive: false) { |e|
-        on_doc_fs_event(e) }
+        on_doc_fs_event(e)
+      }
     end
     @file_watches.reject! do |p, w|
       next false if wanted.includes?(p)
@@ -883,7 +1147,7 @@ class KodkodApp < Egui::App
     return if ctx.memory.modal_open?
     input = ctx.input
     return unless input.pointer_pressed? || !input.keys_pressed.empty? ||
-                 !input.text.empty?
+                  !input.text.empty?
     path = @reload_queue.dequeue(@docs[selected]?.try(&.path)) || return
     # Stale entries (the tab saved since, or closed) ask nothing.
     if (doc = @docs.find { |d| d.path == path }) && (buf = doc.buffer?) &&
@@ -1020,6 +1284,10 @@ class KodkodApp < Egui::App
   private def do_close(doc : Doc) : Nil
     idx = @docs.index(doc) || return
     @docs.delete_at(idx)
+    @pending_focus_fid = nil if doc.focus_id == @pending_focus_fid
+    if (pg = @pending_goto) && pg[0] == doc.focus_id
+      @pending_goto = nil
+    end
     self.selected -= 1 if idx < selected
     self.selected = selected.clamp(0, {@docs.size - 1, 0}.max) unless @docs.empty?
     # No prompts for a closed tab: drop its queued entry and, if its
@@ -1308,12 +1576,11 @@ class KodkodApp < Egui::App
       return Kodkod::VimCommand::Result.error(
         "E32: No file name — save \"#{d.title}\" first.") unless path
       return Kodkod::VimCommand::Result.error("Cannot write #{path}.") \
-        unless write_doc(d, path)
+         unless write_doc(d, path)
     end
     quit_flow
     Kodkod::VimCommand::Result.ok
   end
-
 
   # --- search ----------------------------------------------------------
 
@@ -1332,14 +1599,13 @@ class KodkodApp < Egui::App
 
     # lines after the caret (or before it, backwards), wrapping.
     order = if backward
-      (line - 1).downto(0).to_a + (lines - 1).downto(line).to_a
-    else
-      (line + 1...lines).to_a + [line]
-    end
+              (line - 1).downto(0).to_a + (lines - 1).downto(line).to_a
+            else
+              (line + 1...lines).to_a + [line]
+            end
     order.each do |li|
       text = rope.line_text(li).downcase
-      idx = backward ? text.rindex(q, col - 1)
-                     : text.index(q, li == line ? col + 1 : 0)
+      idx = backward ? text.rindex(q, col - 1) : text.index(q, li == line ? col + 1 : 0)
       next unless idx
       from = rope.line_start(li) + idx
       Kodkod::CodeEditor.set_selection(ctx, doc.focus_id.not_nil!, from, from + q.size)

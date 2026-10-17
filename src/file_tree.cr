@@ -143,7 +143,6 @@ module Kodkod
       @@repaint.try &.call # wake the loop for a fresh walk
     end
 
-
     # Extension → lucide icon name. Everything missing from the map
     # falls back to the plain `file` icon.
     EXT_ICONS = {
@@ -169,14 +168,14 @@ module Kodkod
 
     ICON_SIZE = 16.0
     CHEVRON_W = 14.0
-    INDENT = 14.0
+    INDENT    = 14.0
     # Vertical padding INSIDE a row. Rows stack flush (item_spacing.y
     # is zeroed for the walk, see `ui`), so the breathing room between
     # entries comes from here — the highlight bands stay contiguous.
-    ROW_PAD = 3.0
+    ROW_PAD   =        3.0
     FONT_SALT = 0xF017_u64 # Ctrl +/- font zoom override
-    FONT_MIN = 8.0
-    FONT_MAX = 40.0
+    FONT_MIN  =        8.0
+    FONT_MAX  =       40.0
 
     def initialize(@id : String)
     end
@@ -191,7 +190,7 @@ module Kodkod
       # fiber), where request_repaint must also wake the backend loop
       # (Egui::Runtime.wake) or the fresh listing would wait for the
       # next unrelated repaint.
-      FileTree.repaint = ->{ ui.ctx.request_repaint }
+      FileTree.repaint = -> { ui.ctx.request_repaint }
       FileTree.ensure_watch(root)
       base = Egui::Id.from("kodkod/file_tree/#{@id}")
       @on_activate = on_activate
@@ -279,11 +278,11 @@ module Kodkod
     # the walk, when @rows and @cursor_index are complete.
     private def navigate(ctx : Egui::Context, memory : Egui::Memory,
                          cursor : String?) : Nil
-      return if ctx.memory.focus.id           # another widget's keyboard
-      return if ctx.memory.modal_open?        # a dialog owns the input
-      return if cursor.nil? || cursor.empty?  # never armed
+      return if ctx.memory.focus.id          # another widget's keyboard
+      return if ctx.memory.modal_open?       # a dialog owns the input
+      return if cursor.nil? || cursor.empty? # never armed
       i = @cursor_index
-      return unless i                         # cursor row not visible
+      return unless i # cursor row not visible
       rows = @rows
       row = rows[i]
       input = ctx.input
@@ -450,7 +449,7 @@ module Kodkod
       style = ui.style
       v = style.visuals
       line_h = {style.font_size * Egui::Fonts::LINE_H_FACTOR,
-        style.spacing.interact_size.y}.max + 2.0 * ROW_PAD
+                style.spacing.interact_size.y}.max + 2.0 * ROW_PAD
       indent = depth * INDENT
       rect = ui.allocate_at_least(
         Egui::Vec2.new(ui.max_rect.width - indent, line_h))

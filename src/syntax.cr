@@ -29,5 +29,18 @@ module Kodkod
     def self.highlight(code : String, lang : String) : Array(Token)?
       Highlight.tokens(code, lang).try &.map { |t| Token.new(t[0], t[1]) }
     end
+
+    # Whether an identifier inside a token of this scope may still be
+    # a definition REFERENCE (the editor's Ctrl-link layer): prose
+    # scopes — comments, strings, regexps, quotes — are not code, and
+    # indexed words found there were the mass false positives of the
+    # underline-everything scan. nil scope (plain identifiers) and
+    # code scopes stay linkable.
+    def self.linkable_scope?(scope : String?) : Bool
+      return true if scope.nil?
+      head = scope.split('.').first
+      !{"comment", "string", "quote", "doctag", "regexp",
+        "subst", "escape"}.includes?(head)
+    end
   end
 end
