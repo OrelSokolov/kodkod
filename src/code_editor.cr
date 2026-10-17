@@ -43,6 +43,9 @@ module Kodkod
     BAR_W        =        8.0
     HBAR_H       =        6.0
     GUTTER_PAD   =       10.0
+    # Left padding of the code text: glyphs start a couple pixels
+    # right of the gutter separator instead of touching it.
+    TEXT_PAD     =        2.0
     # Context rows kept above (and below) the caret when the follow
     # pulls the view: the caret lands third from the top, not first.
     CONTEXT_ROWS =          2
@@ -294,8 +297,9 @@ module Kodkod
       digits = {lines.to_s.size, 3}.max
       gutter_w = digits.to_f64 * char_w + GUTTER_PAD * 2.0
       inner = Egui::Rect.from_min_size(
-        Egui::Pos2.new(rect.left + gutter_w, rect.top),
-        Egui::Vec2.new({rect.width - gutter_w - BAR_W, char_w}.max, rect.height))
+        Egui::Pos2.new(rect.left + gutter_w + TEXT_PAD, rect.top),
+        Egui::Vec2.new({rect.width - gutter_w - BAR_W - TEXT_PAD, char_w}.max,
+          rect.height))
       view_h = inner.height
       view_w = inner.width
       memory.data.set_f64(id.child(LINE_H_SALT), line_h)
