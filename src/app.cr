@@ -139,6 +139,13 @@ class KodkodApp < Egui::App
   @next_untitled = 1
   # The tab selection signal — focus follows it (see notepad).
   reactive selected = 0
+  # The explorer tree's KEYBOARD CURSOR (the highlighted row path, ""
+  # = never armed) — app state, deliberately NOT widget focus: egui's
+  # focus lifecycle (latched one-frame requests, the dead-man's
+  # switch, click-outside clears) made focus-based arrows flaky. The
+  # tree reports moves/clicks back into this reactive (on_cursor:)
+  # and reads it next frame (cursor:).
+  reactive explorer_cursor = ""
   @folder : String? = nil
   @status = "Ready."
   # The dirty docs awaiting the confirm-close modal (a batch close
@@ -155,6 +162,10 @@ class KodkodApp < Egui::App
   @file_watches = {} of String => FSWatch::Watch
   @hotkeys_ready = false
   @focused_tab_version : UInt64 = UInt64::MAX
+  # One-frame flag: the explorer tree activated a file THIS frame —
+  # egui focus stays unclaimed so the tree keeps the keyboard (see
+  # the file_tree callback and the ACTIVE TAB = ACTIVE EDITOR block).
+  @explorer_activated = false
   @pending_close : Doc? = nil
   @quitting = false
   @show_fps = false
@@ -360,17 +371,29 @@ class KodkodApp < Egui::App
               if (folder = @folder)
                 ui.label(File.basename(folder))
                 ui.separator
-                # The tree owns its scroll area (keyboard navigation
-                # scrolls the focused row into view). `active` is a
+                # The tree owns its scroll area (the keyboard cursor
+                # scrolls into view when it MOVES). `active` is a
                 # pure function of the tab bar (reactive — see
                 # notepad): whichever way a file becomes current (tree
                 # click, Ctrl+O, Ctrl+P, ':' commands, tab switch) the
                 # explorer follows — expanding to it and scrolling it
-                # into view.
+                # into view. The cursor reactive round-trips row
+                # moves/clicks (see `navigate` in file_tree.cr).
                 ui.file_tree("explorer", folder,
                   active: @docs[selected]?.try(&.path),
+                  cursor: explorer_cursor,
                   show_hidden: @settings.show_hidden,
-                  chevrons: false) do |path|
+                  chevrons: false,
+                  on_cursor: ->(path : String) {
+                    self.explorer_cursor = path
+                    nil
+                  }) do |path|
+                  # A tree activation keeps egui focus OFF the editor
+                  # (see the ACTIVE TAB = ACTIVE EDITOR block below):
+                  # while no widget holds focus the tree owns the
+                  # arrows, so they keep walking the tree after an
+                  # open — like every native file explorer.
+                  @explorer_activated = true
                   open_path(path, existing: true) if File.file?(path)
                 end
               else
@@ -418,14 +441,19 @@ class KodkodApp < Egui::App
                 })
             end
 
-            # ACTIVE TAB = ACTIVE EDITOR, reactively (see notepad).
+            # ACTIVE TAB = ACTIVE EDITOR, reactively (see notepad) —
+            # EXCEPT when the tab change came from the explorer tree
+            # this very frame (@explorer_activated): egui focus must
+            # stay unclaimed so the tree keeps the keyboard (its rule:
+            # it owns the arrows while no other widget holds focus).
             if selected_signal.version != @focused_tab_version
               @focused_tab_version = selected_signal.version
               @vim.reset
-              if (fid = active.focus_id)
+              if (fid = active.focus_id) && !@explorer_activated
                 Kodkod::CodeEditor.request_focus(ctx, fid)
               end
             end
+            @explorer_activated = false
 
             # The VIM layer runs AFTER the widget: it reads this
             # frame's keys and writes caret cells the widget applies

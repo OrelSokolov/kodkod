@@ -43,9 +43,10 @@ module Kodkod
     BAR_W        =        8.0
     HBAR_H       =        6.0
     GUTTER_PAD   =       10.0
-    # Left padding of the code text: glyphs start a couple pixels
-    # right of the gutter separator instead of touching it.
-    TEXT_PAD     =        2.0
+    # Left padding of the code text: glyphs start clear of the gutter
+    # separator line instead of touching it. 8px — visible breathing
+    # room (2px read as nothing next to the 1px line).
+    TEXT_PAD     =        8.0
     # Context rows kept above (and below) the caret when the follow
     # pulls the view: the caret lands third from the top, not first.
     CONTEXT_ROWS =          2
@@ -588,15 +589,17 @@ module Kodkod
       # Current-line highlight (subtle full-width band, VSCode-style):
       # a neutral band — window_fill nudged towards the text color
       # (lighter on dark themes, darker on light ones), never the
-      # saturated selection blue. Suppressed in VIM mode
-      # (cursor_line: false) — vim highlights the caret cell, not the
-      # whole line.
+      # saturated selection blue. Runs from the gutter separator to the
+      # inner right edge — starting it at inner.min.x (which carries
+      # TEXT_PAD) left a background slit between the line and the band.
+      # Suppressed in VIM mode (cursor_line: false) — vim highlights
+      # the caret cell, not the whole line.
       if @cursor_line
         cl_y = inner.min.y + cursor_line.to_f64 * line_h - v_off
         if cl_y >= inner.min.y - line_h && cl_y < inner.max.y
           painter.rect(Egui::Rect.from_min_size(
-            Egui::Pos2.new(inner.min.x, cl_y),
-            Egui::Vec2.new(inner.width, line_h)), 0.0,
+            Egui::Pos2.new(gutter_rect.right, cl_y),
+            Egui::Vec2.new(inner.max.x - gutter_rect.right, line_h)), 0.0,
             visuals.window_fill.lerp(visuals.text_color, 0.06))
         end
       end

@@ -22,18 +22,23 @@
 # compile-time-embedded lucide SVGs: folder / folder-open for
 # directories, a per-extension map for files, `file` as the fallback.
 #
-# KEYBOARD: rows are Sense::Focusable, and a focused row claims the
-# arrow keys (egui's geometric focus navigation would otherwise leap
-# to whatever focusable sits nearest in that direction ANYWHERE in
-# the window — the code editor, the terminal — which reads as random
-# rows lighting up). Instead the walk collects the visible rows in
-# display order and the widget navigates the list itself: Up/Down
-# step one row, Right expands a collapsed folder (or descends into
-# an open one), Left collapses an open folder (or jumps to the
-# parent row), and Enter on the focused row acts exactly like a
-# click — toggling a directory, activating a file. The widget owns
-# its ScrollArea (stable id under `base`) so the focused row can be
-# scrolled into view after the arrows walk it off-screen.
+# KEYBOARD: the cursor is APP STATE, not widget focus — egui's focus
+# system (one-frame-latched requests, the dead-man's switch, geometric
+# arrow navigation, click-outside clears) is a poor home for a list
+# cursor, and routing it through focus made the arrows flaky. Instead
+# the app holds the cursor path (a reactive, passed back in as
+# `cursor:` and reported out through `on_cursor`), and the rows are
+# plain click targets — nothing about them is focusable. The tree
+# drives the keyboard while it OWNS it: no other widget holds egui
+# focus and no modal is up (a click on a row drops focus from
+# whatever held it — egui's click-outside rule — so clicking into the
+# tree is what hands it the keyboard). Up/Down step one row per press
+# through the visible rows in display order, Right expands a
+# collapsed folder (or descends into an open one), Left collapses an
+# open folder (or climbs to the parent row), Enter acts exactly like
+# a click. The widget owns its ScrollArea (stable id under `base`) so
+# the cursor row scrolls into view whenever the cursor MOVES (while
+# it merely stays, the user's own scrolling is left alone).
 
 require "egui-cr/egui"
 require "fswatch"
@@ -177,7 +182,8 @@ module Kodkod
     end
 
     def ui(ui : Egui::Ui, root : String, active : String? = nil,
-           show_hidden : Bool = false, chevrons : Bool = true,
+           cursor : String? = nil, show_hidden : Bool = false,
+           chevrons : Bool = true, on_cursor : (String ->)? = nil,
            &on_activate : String ->) : Nil
       memory = ui.ctx.memory
       # The fs-event doorbell, re-anchored every frame: fswatch
@@ -189,6 +195,7 @@ module Kodkod
       FileTree.ensure_watch(root)
       base = Egui::Id.from("kodkod/file_tree/#{@id}")
       @on_activate = on_activate
+      @on_cursor = on_cursor
       @last_touched_id = lt_id = base.child(Egui::Id.from("last_touched").value)
       memory.use_id(lt_id) # survive end-frame pruning
       @last_touched = memory.data.get_string(lt_id)
@@ -210,15 +217,14 @@ module Kodkod
       end
       memory.data.set_string(active_id, active || "")
       # The tree scrolls in its OWN area (a stable id under `base`) so
-      # the focused row's rect, recorded during the walk, can be
-      # brought into view afterwards (see scroll_focus_into_view).
-      # Reset before the walk: this frame's focus target, if any — and
+      # the cursor row's rect, recorded during the walk, can be
+      # brought into view afterwards (see scroll_rect_into_view).
+      # Reset before the walk: this frame's cursor row, if any — and
       # the visible-row list the keyboard navigation walks (see
       # `navigate`).
       @rows.clear
-      @focused_index = nil
-      @focus_rect = nil
-      @focus_path = nil
+      @cursor_index = nil
+      @cursor_rect = nil
       @active_rect = nil
       scroll_id = base.child(Egui::Id.from("scroll").value)
       viewport = Egui::ScrollArea.new(id: scroll_id).show(ui) do |inner|
@@ -234,59 +240,66 @@ module Kodkod
             # frame (the workspace folder may vanish out from under
             # the app); every row below carries its Entry's flag.
             walk(inner, memory, base, root, File.directory?(root), 0,
-              active, show_hidden, chevrons)
+              active, cursor, show_hidden, chevrons)
           end
         ensure
           inner.style.spacing.item_spacing = old_is
         end
       end
-      # Follow the keyboard cursor ONLY when focus moves to a row:
-      # while it merely STAYS on a row (e.g. after the click that
-      # opened the file) the user's own scrolling is left alone —
-      # re-clamping every frame would pin the viewport to that row.
-      focus_cell = base.child(Egui::Id.from("last_focus").value)
-      memory.use_id(focus_cell) # survive end-frame pruning
-      if (rect = @focus_rect) && (path = @focus_path) &&
-         path != memory.data.get_string(focus_cell)
+      # Follow the keyboard cursor ONLY when it MOVES: while it merely
+      # STAYS on a row (e.g. after the click that opened the file) the
+      # user's own scrolling is left alone — re-clamping every frame
+      # would pin the viewport to that row.
+      cursor_cell = base.child(Egui::Id.from("last_cursor").value)
+      memory.use_id(cursor_cell) # survive end-frame pruning
+      if (path = cursor) && !path.empty? &&
+         path != memory.data.get_string(cursor_cell) &&
+         (rect = @cursor_rect)
         scroll_rect_into_view(ui.ctx, memory, scroll_id, viewport, rect)
       end
-      memory.data.set_string(focus_cell, @focus_path || "")
+      memory.data.set_string(cursor_cell, cursor || "")
       if @reveal && (rect = @active_rect)
         scroll_rect_into_view(ui.ctx, memory, scroll_id, viewport, rect)
       end
-      navigate(ui.ctx, memory)
+      navigate(ui.ctx, memory, cursor)
     end
 
-    # Keyboard navigation over THIS frame's visible rows: Up/Down step
-    # one row in display order, Right expands a collapsed folder or
-    # descends into an open one's first child, Left collapses an open
-    # folder or climbs to the parent row. Focus requests apply next
-    # frame (Focus#request); the scroll-into-view in `ui` follows the
-    # focus change as usual. Runs after the walk, when @rows and
-    # @focused_index are complete.
-    private def navigate(ctx : Egui::Context, memory : Egui::Memory) : Nil
-      i = @focused_index
-      return unless i
+    # The tree's keyboard, driving the APP-OWNED cursor (see `cursor:`
+    # / `on_cursor:`). It owns the arrows only while no other widget
+    # holds egui focus and no modal is up — a click on a row is what
+    # hands it the keyboard (the click drops focus from whatever held
+    # it), and clicking into the editor hands it back. Up/Down step
+    # one row per PRESS through the visible rows in display order
+    # (key repeats may batch several presses into one frame —
+    # consume_key_count keeps every step), Right expands a collapsed
+    # folder or descends into an open one's first child, Left
+    # collapses an open folder or climbs to the parent row, Enter
+    # acts exactly like a click. Moves go out through `on_cursor`;
+    # the app's reactive carries them back in next frame. Runs after
+    # the walk, when @rows and @cursor_index are complete.
+    private def navigate(ctx : Egui::Context, memory : Egui::Memory,
+                         cursor : String?) : Nil
+      return if ctx.memory.focus.id           # another widget's keyboard
+      return if ctx.memory.modal_open?        # a dialog owns the input
+      return if cursor.nil? || cursor.empty?  # never armed
+      i = @cursor_index
+      return unless i                         # cursor row not visible
       rows = @rows
       row = rows[i]
       input = ctx.input
-      if input.consume_key(Egui::KeyCode::Down)
-        if i + 1 < rows.size
-          memory.focus.request(rows[i + 1].node_id)
-          ctx.request_repaint
-        end
-      elsif input.consume_key(Egui::KeyCode::Up)
-        if i > 0
-          memory.focus.request(rows[i - 1].node_id)
-          ctx.request_repaint
-        end
+      target : String? = nil
+      if (steps = input.consume_key_count(Egui::KeyCode::Down)) > 0
+        j = {i + steps, rows.size - 1}.min
+        target = rows[j].path if j > i
+      elsif (steps = input.consume_key_count(Egui::KeyCode::Up)) > 0
+        j = {i - steps, 0}.max
+        target = rows[j].path if j < i
       elsif input.consume_key(Egui::KeyCode::Right)
         if row.dir && !row.open
           memory.data.set_bool(row.node_id, true)
           ctx.request_repaint
         elsif row.dir && i + 1 < rows.size # open: first child
-          memory.focus.request(rows[i + 1].node_id)
-          ctx.request_repaint
+          target = rows[i + 1].path
         end
       elsif input.consume_key(Egui::KeyCode::Left)
         if row.dir && row.open
@@ -295,11 +308,16 @@ module Kodkod
         else # file or collapsed folder: climb to the parent row
           (i - 1).downto(0) do |j|
             next unless rows[j].depth == row.depth - 1
-            memory.focus.request(rows[j].node_id)
-            ctx.request_repaint
+            target = rows[j].path
             break
           end
         end
+      elsif input.consume_key(Egui::KeyCode::Enter)
+        activate(ctx, memory, row.node_id, row.path, row.dir, row.open)
+      end
+      if (path = target) && (cb = @on_cursor)
+        cb.call(path)
+        ctx.request_repaint
       end
     end
 
@@ -395,19 +413,20 @@ module Kodkod
     # open (lazy Dir.children through the listing cache).
     private def walk(ui : Egui::Ui, memory : Egui::Memory, base : Egui::Id,
                      path : String, dir : Bool, depth : Int32, active : String?,
-                     show_hidden : Bool, chevrons : Bool) : Nil
+                     cursor : String?, show_hidden : Bool,
+                     chevrons : Bool) : Nil
       node_id = base.child(Egui::Id.from(path).value)
       open = memory.data.get_bool(node_id, depth.zero?)
 
       row(ui, memory, node_id, path, depth, dir, open,
-        active == path, path == @last_touched, chevrons)
+        active == path, path == @last_touched, path == cursor, chevrons)
 
       if dir && open
         FileTree.listing(path).each do |e|
           next if !show_hidden && e.name.starts_with?('.')
           child = File.join(path, e.name)
-          walk(ui, memory, base, child, e.dir, depth + 1, active, show_hidden,
-            chevrons)
+          walk(ui, memory, base, child, e.dir, depth + 1, active, cursor,
+            show_hidden, chevrons)
         end
       end
     end
@@ -420,14 +439,14 @@ module Kodkod
     # drops the toggle arrows — the folder/folder-open icons carry the
     # open state, and the icon column starts right at the indent.
     #
-    # Rows are also Sense::Focusable: click takes focus, Up/Down walk
-    # the visible rows (see `navigate` — the focused row claims the
-    # arrows from egui's geometric navigation), and Enter on the
-    # focused row acts exactly like a click (activate below).
+    # Rows are plain click targets — deliberately NOT focusable: the
+    # keyboard cursor is app state (`cursor:`/`on_cursor:`, see
+    # `navigate`), and a click both moves it and activates the row.
     private def row(ui : Egui::Ui, memory : Egui::Memory,
                     node_id : Egui::Id, path : String, depth : Int32,
                     dir : Bool, open : Bool, active : Bool,
-                    last_touched : Bool, chevrons : Bool) : Nil
+                    last_touched : Bool, is_cursor : Bool,
+                    chevrons : Bool) : Nil
       style = ui.style
       v = style.visuals
       line_h = {style.font_size * Egui::Fonts::LINE_H_FACTOR,
@@ -444,34 +463,25 @@ module Kodkod
         Egui::Pos2.new(rect.left + indent, rect.top),
         Egui::Vec2.new(
           {ui.max_rect.right - (rect.left + indent), 0.0}.max, line_h))
-      response = ui.interact(row_rect, node_id,
-        Egui::Sense.click | Egui::Sense::Focusable)
-      focused = response.has_focus?
+      response = ui.interact(row_rect, node_id, Egui::Sense.click)
       @rows << Row.new(node_id, path, dir, open, depth)
-      if focused
-        @focus_rect = row_rect
-        @focus_path = path
-        @focused_index = @rows.size - 1
-        # Claim the arrows for the NEXT frame too: egui's geometric
-        # focus navigation (Memory#navigate_focus, begin_frame) would
-        # otherwise race our list walk and leap to focusables outside
-        # the tree. `navigate` below consumes the keys during render.
-        memory.focus.lock_arrows(horizontal: true, vertical: true)
+      if is_cursor
+        @cursor_rect = row_rect
+        @cursor_index = @rows.size - 1
       end
       @active_rect = row_rect if active
 
       if response.clicked?
-        response.request_focus
-        activate(ui.ctx, memory, node_id, path, dir, open)
-      end
-      # Enter on the keyboard-cursor row behaves exactly like a click.
-      if focused && ui.ctx.input.consume_key(Egui::KeyCode::Enter)
+        # A click moves the keyboard cursor onto the row (through the
+        # app's reactive) and activates it — toggle or open, exactly
+        # like Enter on the cursor row.
+        @on_cursor.try &.call(path)
         activate(ui.ctx, memory, node_id, path, dir, open)
       end
 
       if active
         ui.painter.rect(row_rect, 3.0, v.selection_fill)
-      elsif last_touched || focused
+      elsif last_touched || is_cursor
         ui.painter.rect(row_rect, 3.0, v.fade_color(v.selection_fill, 0.6))
       elsif response.hovered?
         ui.painter.rect(row_rect, 3.0, v.fade_color(v.selection_fill, 0.4))
@@ -550,22 +560,21 @@ module Kodkod
     end
 
     @on_activate : (String ->)?
+    @on_cursor : (String ->)?
     @last_touched_id : Egui::Id?
     @last_touched : String = ""
-    # This frame's focused-row rect (screen coords) and path, for
-    # scroll-into-view on focus CHANGE (not every frame — see `ui`).
-    @focus_rect : Egui::Rect?
-    @focus_path : String?
     # This frame's active-row rect, for the reveal scroll; @reveal says
     # `active` changed since the previous frame.
     @active_rect : Egui::Rect?
     @reveal = false
     # The visible rows of THIS frame's walk, in display order, plus
-    # the index of the focused one — what `navigate` walks.
+    # this frame's cursor row (index + rect) — what `navigate` walks
+    # and `ui` scrolls into view on cursor moves.
     record Row, node_id : Egui::Id, path : String, dir : Bool, open : Bool,
       depth : Int32
     @rows = [] of Row
-    @focused_index : Int32?
+    @cursor_index : Int32?
+    @cursor_rect : Egui::Rect?
   end
 end
 
@@ -584,17 +593,22 @@ class Egui::Ui
   # arrows; false leaves the open/closed state to the
   # folder icons alone.
   #
-  # The widget brings its own scroll area. Rows are keyboard-navigable:
-  # click (or Tab) focuses a row, Up/Down walk the visible rows in
-  # display order, Right expands a folder (or steps into an open one's
-  # first child), Left collapses a folder (or climbs to the parent
-  # row), Enter toggles a folder or opens a file, and a row focus
-  # MOVES to is scrolled into view automatically (a row merely KEEPING
-  # focus never fights the user's own scrolling).
+  # The widget brings its own scroll area. The KEYBOARD CURSOR is app
+  # state: pass it back in as `cursor:` (a row path, "" = never
+  # armed) and receive its moves through `on_cursor:` — a reactive in
+  # the app is the natural home (clicks move it too). While no other
+  # widget holds keyboard focus and no modal is up, the tree drives
+  # the arrows: Up/Down walk the visible rows in display order (one
+  # row per press), Right expands a folder (or steps into an open
+  # one's first child), Left collapses a folder (or climbs to the
+  # parent row), Enter toggles a folder or opens a file. A cursor
+  # MOVE scrolls its row into view automatically; a cursor merely
+  # STAYING put never fights the user's own scrolling.
   def file_tree(id : String, root : String, active : String? = nil,
-                show_hidden : Bool = false, chevrons : Bool = true,
+                cursor : String? = nil, show_hidden : Bool = false,
+                chevrons : Bool = true, on_cursor : (String ->)? = nil,
                 &on_activate : String ->) : Nil
-    Kodkod::FileTree.new(id).ui(self, root, active, show_hidden,
-      chevrons, &on_activate)
+    Kodkod::FileTree.new(id).ui(self, root, active, cursor, show_hidden,
+      chevrons, on_cursor, &on_activate)
   end
 end

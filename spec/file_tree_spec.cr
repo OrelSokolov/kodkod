@@ -17,14 +17,17 @@ end
 
 # Drive one frame of a FileTree over *dir* with raw key presses (the
 # keyboard-navigation specs); *on_activate* receives activated files.
+# *cursor*/*on_cursor* round-trip the app-owned keyboard cursor.
 def key_frame(ctx : Egui::Context, dir : String, keys : Array(Egui::KeyCode),
+              cursor : String = "", on_cursor : (String ->)? = nil,
               &on_activate : String ->)
   raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
     Egui::Vec2.new(300.0, 600.0)))
   raw.events = keys.map { |k| Egui::Event.key_pressed(k) }
   ctx.begin_frame(raw)
   ctx.central_panel do |ui|
-    ui.file_tree("x", dir) { |path| on_activate.call(path) }
+    ui.file_tree("x", dir, cursor: cursor, on_cursor: on_cursor) { |path|
+      on_activate.call(path) }
   end
   ctx.end_frame
 end
@@ -241,12 +244,11 @@ describe Kodkod::FileTree do
     end
   end
 
-  # Keyboard navigation: rows are focusable, Up/Down walk them, Enter
-  # acts like a click. Row node ids come from the same scheme the
-  # widget uses (base.child(Id.from(path).value)); focus requests are
-  # applied on the FOLLOWING frame's begin_frame.
+  # Keyboard navigation: the cursor is APP STATE (`cursor:`/`on_cursor:`
+  # — a reactive in the app), not widget focus. The tree drives the
+  # arrows while no other widget holds egui focus and no modal is up.
   describe "keyboard" do
-    it "Enter toggles the focused directory row" do
+    it "Enter toggles the cursor directory row" do
       ctx = Egui::Context.new
       with_temp_dir do |dir|
         Dir.mkdir(File.join(dir, "src"))
@@ -255,72 +257,81 @@ describe Kodkod::FileTree do
         src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
         ctx.memory.data.set_bool(root_id, true)
 
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |_p| } # register rows
-        ctx.memory.focus.request(src_id)                  # cursor on src/
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |_p| } # focus takes hold
-        ctx.memory.data.get_bool(src_id, false).should be_false
-
-        key_frame(ctx, dir, [Egui::KeyCode::Enter]) { |_p| } # open
+        cursor = File.join(dir, "src")
+        noop = ->(_p : String) {}
+        key_frame(ctx, dir, [Egui::KeyCode::Enter], cursor) { |p| noop.call(p) }
         ctx.memory.data.get_bool(src_id, false).should be_true
-        key_frame(ctx, dir, [Egui::KeyCode::Enter]) { |_p| } # close
+        key_frame(ctx, dir, [Egui::KeyCode::Enter], cursor) { |p| noop.call(p) }
         ctx.memory.data.get_bool(src_id, false).should be_false
       end
     end
 
-    it "Enter activates the focused file row" do
+    it "Enter activates the cursor file row" do
       ctx = Egui::Context.new
       with_temp_dir do |dir|
         File.touch(File.join(dir, "main.cr"))
         base = Egui::Id.from("kodkod/file_tree/x")
         root_id = base.child(Egui::Id.from(dir).value)
-        file_id = base.child(Egui::Id.from(File.join(dir, "main.cr")).value)
         ctx.memory.data.set_bool(root_id, true)
 
         opened = nil
         cb = ->(p : String) { opened = p }
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| cb.call(p) }
-        ctx.memory.focus.request(file_id)
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| cb.call(p) }
-        opened.should be_nil
-
-        key_frame(ctx, dir, [Egui::KeyCode::Enter]) { |p| cb.call(p) }
+        key_frame(ctx, dir, [Egui::KeyCode::Enter],
+          File.join(dir, "main.cr")) { |p| cb.call(p) }
         opened.should eq(File.join(dir, "main.cr"))
       end
     end
 
-    it "Up/Down walk the rows" do
+    it "ignores the keyboard while the cursor is unarmed" do
       ctx = Egui::Context.new
       with_temp_dir do |dir|
-        Dir.mkdir(File.join(dir, "src"))
-        File.touch(File.join(dir, "zebra.txt"))
+        File.touch(File.join(dir, "a.txt"))
         base = Egui::Id.from("kodkod/file_tree/x")
         root_id = base.child(Egui::Id.from(dir).value)
-        src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
-        zebra_id = base.child(Egui::Id.from(File.join(dir, "zebra.txt")).value)
         ctx.memory.data.set_bool(root_id, true)
 
-        noop = ->(_p : String) {}
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.request(root_id)
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-
-        # Each arrow moves one row; focus.id updates on the FOLLOWING
-        # frame's begin_frame (navigate_focus requests, Focus applies).
-        key_frame(ctx, dir, [Egui::KeyCode::Down]) { |p| noop.call(p) }
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.id.should eq(src_id)
-
-        key_frame(ctx, dir, [Egui::KeyCode::Down]) { |p| noop.call(p) }
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.id.should eq(zebra_id)
-
-        key_frame(ctx, dir, [Egui::KeyCode::Up]) { |p| noop.call(p) }
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.id.should eq(src_id)
+        moved = ""
+        cb = ->(p : String) { moved = p }
+        key_frame(ctx, dir, [Egui::KeyCode::Down], "", cb) { |_p| }
+        moved.should be_empty
       end
     end
 
-    it "Up/Down walk the VISIBLE tree in display order" do
+    it "ignores the keyboard while another widget holds focus" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        File.touch(File.join(dir, "a.txt"))
+        File.touch(File.join(dir, "b.txt"))
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        ctx.memory.data.set_bool(root_id, true)
+
+        field = ""
+        moved = ""
+        cb = ->(p : String) { moved = p }
+        frame = ->(keys : Array(Egui::KeyCode)) do
+          raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
+            Egui::Vec2.new(300.0, 600.0)))
+          raw.events = keys.map { |k| Egui::Event.key_pressed(k) }
+          ctx.begin_frame(raw)
+          ctx.central_panel do |ui|
+            r = ui.text_edit_singleline(field, focus_id: "f") { |t| field = t }
+            r.try(&.request_focus) # the editor stand-in holds focus
+            ui.file_tree("x", dir, cursor: File.join(dir, "a.txt"),
+              on_cursor: cb) { |_p| }
+          end
+          ctx.end_frame
+        end
+
+        frame.call([] of Egui::KeyCode) # the field takes focus
+        frame.call([] of Egui::KeyCode)
+        ctx.memory.focus.id.should_not be_nil
+        frame.call([Egui::KeyCode::Down])
+        moved.should be_empty
+      end
+    end
+
+    it "Up/Down walk the VISIBLE tree in display order, one step per press" do
       ctx = Egui::Context.new
       with_temp_dir do |dir|
         # root → src (open) → deep (collapsed), a.cr, zebra.txt — the
@@ -331,34 +342,37 @@ describe Kodkod::FileTree do
         File.touch(File.join(dir, "zebra.txt"))
         base = Egui::Id.from("kodkod/file_tree/x")
         root_id = base.child(Egui::Id.from(dir).value)
-        src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
-        a_id = base.child(Egui::Id.from(File.join(dir, "src", "a.cr")).value)
-        deep_id = base.child(Egui::Id.from(File.join(dir, "src", "deep")).value)
-        zebra_id = base.child(Egui::Id.from(File.join(dir, "zebra.txt")).value)
+        src_row_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
+        src_id = File.join(dir, "src")
+        a_id = File.join(dir, "src", "a.cr")
+        deep_id = File.join(dir, "src", "deep")
+        zebra_id = File.join(dir, "zebra.txt")
         ctx.memory.data.set_bool(root_id, true)
-        ctx.memory.data.set_bool(src_id, true)
+        ctx.memory.data.set_bool(src_row_id, true)
 
-        noop = ->(_p : String) {}
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.request(root_id)
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-
-        [src_id, deep_id, a_id, zebra_id].each do |expected|
-          key_frame(ctx, dir, [Egui::KeyCode::Down]) { |p| noop.call(p) }
-          key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-          ctx.memory.focus.id.should eq(expected)
+        cursor = dir
+        cb = ->(p : String) { cursor = p }
+        step = ->(keys : Array(Egui::KeyCode)) do
+          key_frame(ctx, dir, keys, cursor, cb) { |_p| }
         end
 
-        # Down past the last row and Up past the first are no-ops.
-        key_frame(ctx, dir, [Egui::KeyCode::Down]) { |p| noop.call(p) }
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.id.should eq(zebra_id)
+        # Down through every visible row, in order; batching two
+        # presses into one frame takes two steps.
+        step.call([Egui::KeyCode::Down])
+        cursor.should eq(src_id)
+        step.call([Egui::KeyCode::Down])
+        cursor.should eq(deep_id)
+        step.call([Egui::KeyCode::Down, Egui::KeyCode::Down])
+        cursor.should eq(zebra_id)
 
-        [a_id, deep_id, src_id, root_id].each do |expected|
-          key_frame(ctx, dir, [Egui::KeyCode::Up]) { |p| noop.call(p) }
-          key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-          ctx.memory.focus.id.should eq(expected)
-        end
+        # Down past the last row is a no-op.
+        step.call([Egui::KeyCode::Down])
+        cursor.should eq(zebra_id)
+
+        step.call([Egui::KeyCode::Up])
+        cursor.should eq(a_id)
+        step.call([Egui::KeyCode::Up, Egui::KeyCode::Up])
+        cursor.should eq(src_id)
       end
     end
 
@@ -370,29 +384,28 @@ describe Kodkod::FileTree do
         base = Egui::Id.from("kodkod/file_tree/x")
         root_id = base.child(Egui::Id.from(dir).value)
         src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
-        a_id = base.child(Egui::Id.from(File.join(dir, "src", "a.cr")).value)
+        a_id = File.join(dir, "src", "a.cr")
         ctx.memory.data.set_bool(root_id, true)
 
-        noop = ->(_p : String) {}
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.request(src_id)
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        cursor = File.join(dir, "src")
+        cb = ->(p : String) { cursor = p }
+        step = ->(keys : Array(Egui::KeyCode)) do
+          key_frame(ctx, dir, keys, cursor, cb) { |_p| }
+        end
 
-        # Collapsed: Right opens it (focus stays on the folder).
+        # Collapsed: Right opens it (the cursor stays on the folder).
         ctx.memory.data.get_bool(src_id, false).should be_false
-        key_frame(ctx, dir, [Egui::KeyCode::Right]) { |p| noop.call(p) }
+        step.call([Egui::KeyCode::Right])
         ctx.memory.data.get_bool(src_id, false).should be_true
-        ctx.memory.focus.id.should eq(src_id)
+        cursor.should eq(File.join(dir, "src"))
 
         # Open: Right steps to the first child row.
-        key_frame(ctx, dir, [Egui::KeyCode::Right]) { |p| noop.call(p) }
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.id.should eq(a_id)
+        step.call([Egui::KeyCode::Right])
+        cursor.should eq(a_id)
 
         # On a FILE Right is a no-op.
-        key_frame(ctx, dir, [Egui::KeyCode::Right]) { |p| noop.call(p) }
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.id.should eq(a_id)
+        step.call([Egui::KeyCode::Right])
+        cursor.should eq(a_id)
       end
     end
 
@@ -404,68 +417,106 @@ describe Kodkod::FileTree do
         base = Egui::Id.from("kodkod/file_tree/x")
         root_id = base.child(Egui::Id.from(dir).value)
         src_id = base.child(Egui::Id.from(File.join(dir, "src")).value)
-        deep_id = base.child(Egui::Id.from(File.join(dir, "src", "deep")).value)
-        a_id = base.child(
-          Egui::Id.from(File.join(dir, "src", "deep", "a.cr")).value)
-        [root_id, src_id, deep_id].each do |id|
+        deep_row_id = base.child(
+          Egui::Id.from(File.join(dir, "src", "deep")).value)
+        deep_id = File.join(dir, "src", "deep")
+        a_id = File.join(dir, "src", "deep", "a.cr")
+        [root_id, src_id, deep_row_id].each do |id|
           ctx.memory.data.set_bool(id, true)
         end
 
-        noop = ->(_p : String) {}
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.request(a_id)
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
+        cursor = a_id
+        cb = ->(p : String) { cursor = p }
+        step = ->(keys : Array(Egui::KeyCode)) do
+          key_frame(ctx, dir, keys, cursor, cb) { |_p| }
+        end
 
         # On a file Left climbs to the parent row.
-        key_frame(ctx, dir, [Egui::KeyCode::Left]) { |p| noop.call(p) }
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.id.should eq(deep_id)
+        step.call([Egui::KeyCode::Left])
+        cursor.should eq(deep_id)
 
-        # On an open folder Left collapses it (focus stays).
-        ctx.memory.data.get_bool(deep_id, false).should be_true
-        key_frame(ctx, dir, [Egui::KeyCode::Left]) { |p| noop.call(p) }
-        ctx.memory.data.get_bool(deep_id, false).should be_false
-        ctx.memory.focus.id.should eq(deep_id)
+        # On an open folder Left collapses it (the cursor stays).
+        ctx.memory.data.get_bool(deep_row_id, false).should be_true
+        step.call([Egui::KeyCode::Left])
+        ctx.memory.data.get_bool(deep_row_id, false).should be_false
+        cursor.should eq(deep_id)
 
         # Collapsed: Left climbs to the parent again.
-        key_frame(ctx, dir, [Egui::KeyCode::Left]) { |p| noop.call(p) }
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.id.should eq(src_id)
+        step.call([Egui::KeyCode::Left])
+        cursor.should eq(File.join(dir, "src"))
 
         # Left on the OPEN root row collapses it — there is no parent
-        # row to climb to, and focus stays put.
-        ctx.memory.focus.request(root_id)
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        key_frame(ctx, dir, [Egui::KeyCode::Left]) { |p| noop.call(p) }
+        # row to climb to, and the cursor stays put.
+        cursor = dir
+        step.call([Egui::KeyCode::Left])
         ctx.memory.data.get_bool(root_id, true).should be_false
-        key_frame(ctx, dir, [] of Egui::KeyCode) { |p| noop.call(p) }
-        ctx.memory.focus.id.should eq(root_id)
+        cursor.should eq(dir)
       end
     end
 
-    it "scrolls the focused row into view" do
+    it "a click arms the cursor and the arrows follow it" do
+      ctx = Egui::Context.new
+      with_temp_dir do |dir|
+        Dir.mkdir(File.join(dir, "src"))
+        File.touch(File.join(dir, "a.txt"))
+        base = Egui::Id.from("kodkod/file_tree/x")
+        root_id = base.child(Egui::Id.from(dir).value)
+        src_id = File.join(dir, "src")
+        a_id = File.join(dir, "a.txt")
+        ctx.memory.data.set_bool(root_id, true)
+
+        cursor = ""
+        cb = ->(p : String) { cursor = p }
+        frame = ->(events : Array(Egui::Event)) do
+          raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
+            Egui::Vec2.new(300.0, 600.0)))
+          raw.events = events
+          ctx.begin_frame(raw)
+          ctx.central_panel do |ui|
+            ui.file_tree("x", dir, cursor: cursor, on_cursor: cb) { |_p| }
+          end
+          ctx.end_frame
+        end
+
+        # Click the src row (dirs sort first; row text centers sit at
+        # ~21 / ~48 in the default central panel — see the probe in
+        # the spec history).
+        frame.call([] of Egui::Event) # register row geometry for hit-testing
+        pos = Egui::Pos2.new(30.0, 48.0)
+        frame.call([Egui::Event.pointer_moved(pos),
+                    Egui::Event.pointer_pressed(pos)] of Egui::Event)
+        frame.call([Egui::Event.pointer_released(pos)] of Egui::Event)
+        cursor.should eq(src_id)
+
+        # The keyboard picks up from the clicked row immediately.
+        frame.call([Egui::Event.key_pressed(Egui::KeyCode::Down)] of Egui::Event)
+        cursor.should eq(a_id)
+      end
+    end
+
+    it "scrolls the cursor row into view" do
       ctx = Egui::Context.new
       with_temp_dir do |dir|
         40.times { |i| File.touch(File.join(dir, "f%02d.txt" % i)) }
         base = Egui::Id.from("kodkod/file_tree/x")
         root_id = base.child(Egui::Id.from(dir).value)
-        ctx.memory.data.set_bool(root_id, true)
         scroll_id = base.child(Egui::Id.from("scroll").value)
+        ctx.memory.data.set_bool(root_id, true)
 
         # A short window: only a few of the 41 rows fit the viewport.
-        raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
-          Egui::Vec2.new(300.0, 120.0)))
+        cursor = dir
+        cb = ->(p : String) { cursor = p }
         frame = ->(keys : Array(Egui::KeyCode)) do
+          raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
+            Egui::Vec2.new(300.0, 120.0)))
           raw.events = keys.map { |k| Egui::Event.key_pressed(k) }
           ctx.begin_frame(raw)
           ctx.central_panel do |ui|
-            ui.file_tree("x", dir) { |_p| }
+            ui.file_tree("x", dir, cursor: cursor, on_cursor: cb) { |_p| }
           end
           ctx.end_frame
         end
 
-        frame.call([] of Egui::KeyCode)
-        ctx.memory.focus.request(root_id)
         frame.call([] of Egui::KeyCode)
         ctx.memory.data.get_vec2(scroll_id).y.should eq(0.0)
 
@@ -474,29 +525,27 @@ describe Kodkod::FileTree do
       end
     end
 
-    it "keeps the user's scroll while focus merely stays on a row" do
+    it "keeps the user's scroll while the cursor merely stays" do
       ctx = Egui::Context.new
       with_temp_dir do |dir|
         40.times { |i| File.touch(File.join(dir, "f%02d.txt" % i)) }
         base = Egui::Id.from("kodkod/file_tree/x")
-        root_id = base.child(Egui::Id.from(dir).value)
         scroll_id = base.child(Egui::Id.from("scroll").value)
 
         raw = Egui::RawInput.new(Egui::Rect.from_min_size(Egui::Pos2.zero,
           Egui::Vec2.new(300.0, 120.0)))
+        cursor = File.join(dir, "f00.txt")
         frame = -> do
           ctx.begin_frame(raw)
           ctx.central_panel do |ui|
-            ui.file_tree("x", dir) { |_p| }
+            ui.file_tree("x", dir, cursor: cursor) { |_p| }
           end
           ctx.end_frame
         end
 
-        frame.call # register rows
-        ctx.memory.focus.request(root_id)
-        frame.call # focus takes hold (like the click that opened a file)
+        frame.call # the cursor row renders and settles
 
-        # The user scrolls the tree away from the focused row; the
+        # The user scrolls the tree away from the cursor row; the
         # viewport must NOT be pulled back on the following frames.
         ctx.memory.data.set_vec2(scroll_id, Egui::Vec2.new(0.0, 500.0))
         3.times { frame.call }
@@ -504,8 +553,8 @@ describe Kodkod::FileTree do
       end
     end
   end
-end
 
+end
 describe "FileTree font zoom" do
   it "Ctrl+Minus/Equal zoom the tree font on hover, whole points only" do
     ctx = Egui::Context.new

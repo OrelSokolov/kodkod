@@ -135,7 +135,9 @@ module Kodkod
       end
 
       screen = ctx.input.screen_rect
-      anchor = Egui::Pos2.new(screen.center.x - WIDTH / 2.0, screen.top + 48.0)
+      # Below the window chrome — the borderless frame's title/tab bar
+      # plus the menu bar — so the panel doesn't overlap them.
+      anchor = Egui::Pos2.new(screen.center.x - WIDTH / 2.0, screen.top + 120.0)
       ctx.popup(POPUP_ID, anchor, width: WIDTH) do |ui|
         # Sublime's query line: flat, frameless, the panel's full width
         # — not a boxed form field. `add_sized` stretches the edit
@@ -163,6 +165,10 @@ module Kodkod
           resp.request_focus
           @focus_pending = false
         end
+        # The rule between the query line and the results — the
+        # Separator widget fills the panel's width in a vertical
+        # layout and takes its color from the theme.
+        ui.separator
         rows.each_with_index do |(path, result), i|
           if row(ui, path, result, selected: i == @selected).clicked?
             close(ctx)
@@ -390,13 +396,15 @@ module Kodkod
         {ui.available_width, natural + 2 * pad.x}.max, height))
       resp = ui.interact(rect, ui.next_widget_id, Egui::Sense.click)
 
+      # Gray, not the saturated selection blue: Sublime's Goto Anything
+      # highlights rows with a neutral fill, so the accent stays on the
+      # matched characters. The theme's gray button ramp keeps the
+      # selected > hovered ordering (menu rows use the same slots).
       if selected
         painter.rect(rect, 4.0,
-          resp.active? ? visuals.button_active
-                       : visuals.fade_color(visuals.selection_fill, 0.6))
+          resp.active? ? visuals.button_active : visuals.button_hovered)
       elsif resp.hovered?
-        painter.rect(rect, 4.0,
-          visuals.fade_color(visuals.selection_fill, 0.4))
+        painter.rect(rect, 4.0, visuals.button_weak)
       end
 
       dim = visuals.fade_color(visuals.text_color, 0.55)
