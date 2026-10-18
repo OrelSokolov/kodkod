@@ -9,7 +9,7 @@
 #
 # Scope: the basic vim toolkit — modes (normal/insert/visual v/V/
 # command), counts (3j, 2dd), motions (h j k l w b e 0 ^ $ gg G
-# f/F/t/T, Ctrl-d/u), operators (x dd dw d$ D cc cw yy p P u), visual
+# f/F/t/T, Ctrl-d/u), operators (x r dd dw d$ D cc cw yy p P u), visual
 # selection (v charwise, V linewise; motions extend it, d/y/c operate,
 # o swaps the ends), and the `:` command line, executed by
 # VimCommand::Runner (:w :q :wq :tabnew :{n} …). One unnamed register
@@ -121,6 +121,13 @@ module Kodkod
                               focus_id : String) : Bool
       input = ctx.input
 
+      # Escape cancels a half-typed prefix (2f…, 3r…) — a plain Escape
+      # with nothing pending stays untouched (no-op in normal mode).
+      if !@pending.empty? && input.consume_key(Egui::KeyCode::Escape)
+        @pending = ""
+        return true
+      end
+
       # A selection in normal mode is MOUSE-made (the widget keyboard
       # — shift+arrows — is off here, and every motion collapses the
       # anchor). The standard-editor keys then honor the drag
@@ -169,6 +176,19 @@ module Kodkod
       while i < chars.size
         ch = chars[i]
         i += 1
+
+        # An "r" prefix (3r…) takes ANY char as its replacement.
+        if (m = @pending.match(/\A(\d*)r\z/))
+          unless ch == '\n' # r<CR> is a line split in vim — cancel quietly
+            count_s = m[1]? || ""
+            replace_chars(ctx, buffer, focus_id, ch,
+              count_s.empty? ? 1 : count_s.to_i)
+          end
+          @pending = ""
+          acted = true
+          break unless @mode.normal?
+          next
+        end
 
         # A find prefix (2f…) takes ANY char as its target.
         if (m = @pending.match(/\A(\d*)([fFtT])\z/))
@@ -239,7 +259,7 @@ module Kodkod
         when 'u'
           CodeEditor.undo(ctx, buffer, focus_id)
           @pending = ""
-        when 'f', 'F', 't', 'T'
+        when 'f', 'F', 't', 'T', 'r'
           @pending += ch
         when ':'
           @mode = Mode::Command
@@ -812,6 +832,20 @@ module Kodkod
       return if n <= 0
       Egui::SystemPorts::Clipboard.text = rope.slice(cur, n)
       CodeEditor.delete_chars(ctx, buffer, focus_id, cur, n)
+    end
+
+    # r{char} — replace `count` chars at the caret with `char`. Vim does
+    # nothing (a beep) when fewer than `count` chars remain on the line;
+    # the caret lands on the last replaced char.
+    private def replace_chars(ctx : Egui::Context, buffer : EditorBuffer,
+                              focus_id : String, ch : Char, count : Int32) : Nil
+      rope = buffer.rope
+      cur = CodeEditor.cursor_offset(ctx, focus_id)
+      line, col = rope.line_col_of(cur)
+      n = {count, rope.line_length(line) - col}.min
+      return if n < count
+      CodeEditor.replace_range(ctx, buffer, focus_id, cur, n, ch.to_s * n)
+      CodeEditor.set_cursor_offset(ctx, buffer, focus_id, cur + n - 1)
     end
 
     private def delete_to_eol(ctx : Egui::Context, buffer : EditorBuffer,

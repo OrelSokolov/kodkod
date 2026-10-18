@@ -437,6 +437,50 @@ describe Kodkod::VimMode do
     Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 1})
   end
 
+  it "r replaces the char under the caret and stays in normal mode" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("hello")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    Kodkod::CodeEditor.set_cursor(ctx, b, "v1", 0, 1)
+    vim_frame(ctx, vim, b, "v1", events: type("rE"), time: 0.048)
+    b.text.should eq("hEllo")
+    vim.mode.normal?.should be_true
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 1}) # on the new char
+  end
+
+  it "3r replaces three chars with one, caret on the last" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("abcdef")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    Kodkod::CodeEditor.set_cursor(ctx, b, "v1", 0, 1)
+    vim_frame(ctx, vim, b, "v1", events: type("3rX"), time: 0.048)
+    b.text.should eq("aXXXef")
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 3})
+  end
+
+  it "r does not cross the line end and Esc cancels the prefix" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("ab\ncd")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    Kodkod::CodeEditor.set_cursor(ctx, b, "v1", 0, 1)
+    vim_frame(ctx, vim, b, "v1", events: type("3rX"), time: 0.048)
+    b.text.should eq("ab\ncd") # only 1 char left — vim aborts
+    vim_frame(ctx, vim, b, "v1", events: type("r"), time: 0.064)
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Escape)],
+      time: 0.08)
+    b.text.should eq("ab\ncd") # cancelled, nothing replaced
+  end
+
   it "Ctrl+C copies a mouse-made selection in normal mode" do
     ctx = Egui::Context.new
     vim = Kodkod::VimMode.new

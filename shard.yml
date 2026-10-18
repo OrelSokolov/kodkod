@@ -1,5 +1,5 @@
 name: kodkod
-version: 0.1.1
+version: 0.1.2
 description: |
   kodkod — a code editor (VSCode/Zed-like) built on egui-cr: a rope
   buffer for huge files, syntax highlighting via the highlight.cr
