@@ -13,7 +13,9 @@
 # selection (v charwise, V linewise; motions extend it, d/y/c operate,
 # o swaps the ends), and the `:` command line, executed by
 # VimCommand::Runner (:w :q :wq :tabnew :{n} …). One unnamed register
-# (the system clipboard). Text objects, macros, :s — future work.
+# (the system clipboard). '/' search (literal pattern, wrap-around,
+# n/N repeat, '?' backwards) shares the ':' line machinery. Text
+# objects, macros, :s — future work.
 
 require "./code_editor"
 require "./vim_command"
@@ -24,14 +26,20 @@ module Kodkod
       Normal
       Insert
       Visual
-      Command # typing after ':' in normal mode
+      Command # typing after ':' (or '/'/'?') in normal mode
     end
 
     property mode : Mode = Mode::Normal
     # Pending keystrokes: a count ("3"), an operator ("d", "y", "c"),
     # a find prefix ("2f"), or the "g" of "gg".
     property pending : String = ""
-    property command : String = "" # the ':' command line being typed
+    property command : String = "" # the ':'/'/' line being typed
+    # The prompt of the line being typed: ':' runs a command, '/'/'?'
+    # run a search. Plus the last executed search — the pattern and
+    # direction that n/N repeat (an empty '/' line reuses it, vim).
+    property line_prompt : Char = ':'
+    property search_pattern : String = ""
+    property? search_fwd : Bool = true
     # Visual mode: the linewise submode (V) and the RAW anchor offset.
     # The anchor lives vim-side — in linewise mode the widget's
     # caret/anchor cells are published at LINE BOUNDARIES (so the
@@ -49,6 +57,7 @@ module Kodkod
       @mode = Mode::Normal
       @pending = ""
       @command = ""
+      @line_prompt = ':'
       @visual_line = false
       @visual_anchor = 0
     end
@@ -57,7 +66,7 @@ module Kodkod
       case @mode
       when .insert?  then "-- INSERT --"
       when .visual?  then @visual_line ? "-- VISUAL LINE --" : "-- VISUAL --"
-      when .command? then "-- COMMAND --"
+      when .command? then @line_prompt == ':' ? "-- COMMAND --" : "-- SEARCH --"
       else                 "-- NORMAL --"
       end
     end
@@ -261,12 +270,19 @@ module Kodkod
           @pending = ""
         when 'f', 'F', 't', 'T', 'r'
           @pending += ch
-        when ':'
+        when ':', '/', '?'
           @mode = Mode::Command
+          @line_prompt = ch
           @command = chars[i..].join # rest of THIS frame feeds the line
           @commands.clear_message   # the line replaces the last message
           @pending = ""
           i = chars.size
+        when 'n'
+          search_jump(ctx, buffer, focus_id, @search_fwd, count)
+          @pending = ""
+        when 'N'
+          search_jump(ctx, buffer, focus_id, !@search_fwd, count)
+          @pending = ""
         else
           # Unknown command: clear pending (vim beeps; we reset
           # quietly) and keep the rest of the frame's chars.
@@ -480,7 +496,12 @@ module Kodkod
         return true
       end
       if input.consume_key(Egui::KeyCode::Enter)
-        run_command(ctx, buffer, focus_id, @command.strip)
+        if @line_prompt == ':'
+          run_command(ctx, buffer, focus_id, @command.strip)
+        else
+          run_search(ctx, buffer, focus_id, @command,
+            forward: @line_prompt == '/')
+        end
         @mode = Mode::Normal
         @command = ""
         return true
@@ -505,6 +526,70 @@ module Kodkod
     private def run_command(ctx : Egui::Context, buffer : EditorBuffer,
                             focus_id : String, cmd : String) : Nil
       @commands.run(ctx, buffer, focus_id, cmd)
+    end
+
+    # --- '/' and '?' search -------------------------------------------------
+
+    # A literal string search (vim's plain /pattern without magic).
+    # run_search stores the pattern/direction for n/N (an empty line
+    # reuses the last pattern, like vim); search_jump moves.
+    private def run_search(ctx : Egui::Context, buffer : EditorBuffer,
+                           focus_id : String, pattern : String,
+                           forward : Bool) : Nil
+      unless pattern.empty?
+        @search_pattern = pattern
+        @search_fwd = forward
+      end
+      search_jump(ctx, buffer, focus_id, @search_fwd, 1)
+    end
+
+    # Jump to the count-th match from the caret (wrapscan wraps at the
+    # buffer ends); E486 when not found, E35 when nothing was ever
+    # searched. Feedback rides the command bar like the E-messages.
+    private def search_jump(ctx : Egui::Context, buffer : EditorBuffer,
+                            focus_id : String, forward : Bool,
+                            count : Int32) : Nil
+      if @search_pattern.empty?
+        @commands.last_message = VimCommand::Message.new(
+          VimCommand::Kind::Error, "E35: No previous regular expression")
+        return
+      end
+      text = buffer.rope.to_s
+      pat = @search_pattern
+      cur = CodeEditor.cursor_offset(ctx, focus_id)
+      at = -1
+      count.times do
+        at = search_step(text, pat, cur, forward)
+        break if at < 0
+        cur = at
+      end
+      if at < 0
+        @commands.last_message = VimCommand::Message.new(
+          VimCommand::Kind::Error, "E486: Pattern not found: #{pat}")
+        return
+      end
+      @commands.clear_message
+      line, col = buffer.rope.line_col_of(at)
+      CodeEditor.set_cursor_offset(ctx, buffer, focus_id, at)
+      set_desired_col(ctx, focus_id, col)
+      CodeEditor.scroll_to_line(ctx, focus_id, line)
+    end
+
+    # One step from `cur`: the nearest match strictly after the caret
+    # (forward) or the nearest match ending at/before the caret
+    # (backward) — a match covering the caret never counts — wrapping
+    # at the buffer ends. Match START offset, or -1.
+    private def search_step(text : String, pat : String, cur : Int32,
+                            forward : Bool) : Int32
+      if forward
+        return -1 if pat.empty?
+        from = {cur + 1, text.size}.min
+        text.index(pat, from) || text.index(pat, 0) || -1
+      else
+        hi = cur - pat.size # a match may START no later than this
+        return -1 if hi < 0 || pat.empty?
+        text.rindex(pat, hi) || text.rindex(pat) || -1
+      end
     end
 
     # --- motions -------------------------------------------------------------
@@ -911,7 +996,7 @@ module Kodkod
     # per-frame and nothing else consumes it while the widget renders
     # keyboard: false.
     private def command_char?(c : Char) : Bool
-      c.ascii_letter? || c.number? || ":$^0".includes?(c)
+      c.ascii_letter? || c.number? || ":$^0/?".includes?(c)
     end
   end
 end

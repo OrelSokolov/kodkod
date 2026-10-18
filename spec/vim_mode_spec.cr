@@ -437,6 +437,83 @@ describe Kodkod::VimMode do
     Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 1})
   end
 
+  it "/ searches forward and n repeats, wrapping around" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("foo bar\nbaz foo\nend")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    Kodkod::CodeEditor.set_cursor(ctx, b, "v1", 0, 0)
+    vim_frame(ctx, vim, b, "v1", events: type("/ba"), time: 0.048)
+    vim.mode.command?.should be_true
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Enter)],
+      time: 0.064)
+    vim.mode.normal?.should be_true
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 4}) # "bar"
+    vim_frame(ctx, vim, b, "v1", events: type("n"), time: 0.08)
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({1, 0}) # "baz"
+    vim_frame(ctx, vim, b, "v1", events: type("n"), time: 0.096)
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 4}) # wrap
+  end
+
+  it "? searches backwards and N inverts" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("foo bar\nbaz foo\nend")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    Kodkod::CodeEditor.set_cursor(ctx, b, "v1", 2, 0)
+    vim_frame(ctx, vim, b, "v1", events: type("?foo"), time: 0.048)
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Enter)],
+      time: 0.064)
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({1, 4})
+    vim_frame(ctx, vim, b, "v1", events: type("n"), time: 0.08)
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 0}) # next backwards
+    vim_frame(ctx, vim, b, "v1", events: type("N"), time: 0.096)
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({1, 4}) # inverted
+  end
+
+  it "/ with no hits reports E486 and keeps the caret" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("hello")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    Kodkod::CodeEditor.set_cursor(ctx, b, "v1", 0, 2)
+    vim_frame(ctx, vim, b, "v1", events: type("/zzz"), time: 0.048)
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Enter)],
+      time: 0.064)
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 2})
+    msg = vim.commands.last_message
+    msg.should_not be_nil
+    msg.not_nil!.text.should contain("E486")
+  end
+
+  it "/ Enter with an empty line repeats the last pattern" do
+    ctx = Egui::Context.new
+    vim = Kodkod::VimMode.new
+    b = Kodkod::EditorBuffer.new("ab ab")
+    Kodkod::CodeEditor.request_focus(ctx, "v1")
+    vim_frame(ctx, vim, b, "v1")
+    vim_frame(ctx, vim, b, "v1", time: 0.032)
+    vim_frame(ctx, vim, b, "v1", events: type("/ab"), time: 0.048)
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Enter)],
+      time: 0.064)
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 3}) # match under the caret is skipped
+    vim_frame(ctx, vim, b, "v1", events: type("/"), time: 0.08)
+    vim_frame(ctx, vim, b, "v1",
+      events: [Egui::Event.key_pressed(Egui::KeyCode::Enter)],
+      time: 0.096)
+    Kodkod::CodeEditor.cursor(ctx, b, "v1").should eq({0, 0}) # wraps to the top
+  end
+
   it "r replaces the char under the caret and stays in normal mode" do
     ctx = Egui::Context.new
     vim = Kodkod::VimMode.new

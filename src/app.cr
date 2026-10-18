@@ -568,9 +568,9 @@ class KodkodApp < Egui::App
                 mode = @vim.enabled? ? @vim.status_label : t("status.standard")
                 lang = buffer.lang || "plain"
                 path = buffer.path || buffer.name
-                # A ':' line being typed takes over the ruler spot (vim's
-                # command line sits over the Ln/Col area).
-                pos = @vim.enabled? && @vim.mode.command? ? ":#{@vim.command}█" : t("status.ruler", line: line + 1, col: col + 1)
+                # A ':'/'/'/'?' line being typed takes over the ruler spot
+                # (vim's command line sits over the Ln/Col area).
+                pos = @vim.enabled? && @vim.mode.command? ? "#{@vim.line_prompt}#{@vim.command}█" : t("status.ruler", line: line + 1, col: col + 1)
                 ui.label("#{mode}   #{pos}   " \
                          "#{lang}   #{path}#{active.dirty? ? t("status.modified") : ""}")
               end
