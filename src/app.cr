@@ -37,6 +37,7 @@ class KodkodApp < Egui::App
     property show_hidden : Bool = false
     property show_explorer : Bool = true
     property cursor_blinks : Bool = true
+    property highlight_cursor_line : Bool = true
     property syntax_highlight : Bool = true
     property goto_def : Bool = true
     property language : String = "en"
@@ -45,6 +46,7 @@ class KodkodApp < Egui::App
                    @show_hidden : Bool = false,
                    @show_explorer : Bool = true,
                    @cursor_blinks : Bool = true,
+                   @highlight_cursor_line : Bool = true,
                    @syntax_highlight : Bool = true,
                    @goto_def : Bool = true,
                    @language : String = "en")
@@ -491,8 +493,9 @@ class KodkodApp < Egui::App
                 # governs the standard (non-VIM) editor.
                 rows: 100, cursor_style: @vim.cursor_style,
                 cursor_blinks: !@vim.enabled? && @settings.cursor_blinks,
-                # VIM highlights the caret cell, not the whole line.
-                cursor_line: !@vim.enabled?,
+                # The setting governs the current-line band in both the
+                # standard editor and VIM mode.
+                cursor_line: @settings.highlight_cursor_line,
                 # Off = render plain (no tokenization/measured token
                 # runs) — the long-line/minified-file escape hatch.
                 syntax_highlight: @settings.syntax_highlight,
@@ -562,12 +565,12 @@ class KodkodApp < Egui::App
             end
             if (active = @docs[selected]?)
               if (viewer = active.viewer?)
-                ui.label("#{t("status.viewer")}   #{viewer.status_info}   #{viewer.path}")
+                ui.label("#{t("status.viewer")}   #{viewer.status_info}   #{viewer.name}")
               elsif (buffer = active.buffer?)
                 line, col = Kodkod::CodeEditor.cursor(ctx, buffer, active.focus_id.not_nil!)
                 mode = @vim.enabled? ? @vim.status_label : t("status.standard")
                 lang = buffer.lang || "plain"
-                path = buffer.path || buffer.name
+                path = buffer.name
                 # A ':'/'/'/'?' line being typed takes over the ruler spot
                 # (vim's command line sits over the Ln/Col area).
                 pos = @vim.enabled? && @vim.mode.command? ? "#{@vim.line_prompt}#{@vim.command}█" : t("status.ruler", line: line + 1, col: col + 1)
@@ -630,6 +633,10 @@ class KodkodApp < Egui::App
         end
         if ui.selectable_label(@settings.cursor_blinks, t("settings.blink")).clicked?
           @settings.cursor_blinks = !@settings.cursor_blinks
+          save_settings
+        end
+        if ui.selectable_label(@settings.highlight_cursor_line, t("settings.cursor_line")).clicked?
+          @settings.highlight_cursor_line = !@settings.highlight_cursor_line
           save_settings
         end
         if ui.selectable_label(@settings.syntax_highlight, t("settings.syntax")).clicked?

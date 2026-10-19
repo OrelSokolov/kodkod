@@ -682,20 +682,24 @@ module Kodkod
       cursor_line = rope.line_of(cursor)
 
       # Current-line highlight (subtle full-width band, VSCode-style):
-      # a neutral band — window_fill nudged towards the text color
-      # (lighter on dark themes, darker on light ones), never the
-      # saturated selection blue. Runs from the gutter separator to the
-      # inner right edge — starting it at inner.min.x (which carries
-      # TEXT_PAD) left a background slit between the line and the band.
-      # Suppressed in VIM mode (cursor_line: false) — vim highlights
-      # the caret cell, not the whole line.
+      # a neutral band DARKER than the editor background — lerped
+      # towards black on dark themes, towards the text color on light
+      # ones — never the saturated selection blue. Runs from the gutter
+      # separator to the inner right edge — starting it at inner.min.x
+      # (which carries TEXT_PAD) left a background slit between the
+      # line and the band.
+      # Gated by the cursor_line flag (the app's highlight_cursor_line
+      # setting); VIM mode draws it too, over its caret-cell highlight.
       if @cursor_line
         cl_y = inner.min.y + cursor_line.to_f64 * line_h - v_off
         if cl_y >= inner.min.y - line_h && cl_y < inner.max.y
+          band = visuals.dark ?
+            visuals.window_fill.lerp(Egui::Color32.rgb(0, 0, 0), 0.18) :
+            visuals.window_fill.lerp(visuals.text_color, 0.06)
           painter.rect(Egui::Rect.from_min_size(
             Egui::Pos2.new(gutter_rect.right, cl_y),
             Egui::Vec2.new(inner.max.x - gutter_rect.right, line_h)), 0.0,
-            visuals.window_fill.lerp(visuals.text_color, 0.06))
+            band)
         end
       end
 
