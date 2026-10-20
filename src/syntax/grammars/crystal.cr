@@ -173,9 +173,12 @@ module Kodkod
                                scope: "variable",
                                match: /@[a-zA-Z_]\w*[?!]?/
                              ),
+                             # \b keeps digits inside identifiers (app2,
+                             # ctx2) from matching; hex/oct/bin first so
+                             # 0xff is not split into 0 + xff.
                              Highlight::Mode.new.apply(
                                scope: "number",
-                               match: /\d[\d_]*((\.[\d_]+)?([eE][+-]?\d+)?)?|0[xob][0-9a-fA-F_]+/
+                               match: /\b0[xob][0-9a-fA-F_]+|\b\d[\d_]*((\.[\d_]+)?([eE][+-]?\d+)?)?/
                              ),
                              Highlight::Mode.new.apply(
                                scope: "regexp",
