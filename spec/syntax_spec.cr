@@ -115,6 +115,24 @@ describe Kodkod::Syntax do
       token_with(tokens, "42").not_nil!.scope.should eq("number")
     end
 
+    it "paints crystal like ruby (shared constructs, same scopes)" do
+      code = "class Foo < Bar\n  def run\n    self\n  end\nend\ny = Camel.new(1)\n"
+      crystal_toks = Kodkod::Syntax.highlight(code, "crystal").not_nil!
+      ruby_toks = Kodkod::Syntax.highlight(code, "ruby").not_nil!
+      {"class"  => "keyword",
+       "Foo"    => "title.class",
+       "Bar"    => "title.class.inherited",
+       "def"    => "keyword",
+       "run"    => "title.function",
+       "self"   => "variable.language",
+       "end"    => "keyword",
+       "Camel"  => "title.class",
+       "1"      => "number"}.each do |word, scope|
+        token_with(crystal_toks, word).not_nil!.scope.should eq(scope)
+        token_with(ruby_toks, word).not_nil!.scope.should eq(scope)
+      end
+    end
+
     it "classifies json keys, strings, numbers, literals" do
       code = %q({"a": "b", "n": 3, "t": true, "f": null})
       tokens = Kodkod::Syntax.highlight(code, "json").not_nil!
