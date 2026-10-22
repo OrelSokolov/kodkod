@@ -1,20 +1,27 @@
 # kodkod — IndexQueue: the project indexer's jobs queue. The DEFAULT
-# queue comes from a gitignore-aware walk of the workspace root: one
-# job per top-level folder (plus one for the root's own files), so
-# progress is observable per folder and no single job hogs the worker.
-# Later, fs-change events (the EventBus's "index.fs") append small
-# per-file/per-dir reindex jobs on the fly.
+# queue comes from the workspace root's own directory listing only
+# (one readdir — cheap): one job per top-level folder (plus one for
+# the root's loose files). The per-folder RECURSIVE walks run on the
+# worker fiber, never on the caller's — enumerating a heavy project
+# must not block the UI fiber that called start(). fs-change events
+# (the EventBus's "index.fs") append debounced per-file reindex jobs
+# (a save storm owes one job per file) and lazy walk jobs for new
+# directories.
 #
 # The worker is a spawned fiber, not a thread: the Crystal scheduler
-# is cooperative, and the loop Fiber.yields after every file so the
-# UI keeps its frames. A `generation` counter invalidates a worker
-# mid-run when the project folder changes or a rescan is ordered —
-# the loop notices and exits without touching the fresh state.
+# is cooperative, so the loop budgets its slices by the CLOCK (SLICE)
+# rather than per file — one oversized file cannot eat a frame — and
+# SymbolExtractor.extract checkpoints every 512 lines through the
+# same budget. Among pending jobs, the one covering the active
+# editor's file (the @prio_for proc) jumps the queue. A `generation`
+# counter invalidates a worker mid-run when the project folder
+# changes or a rescan is ordered — the loop notices and exits without
+# touching the fresh state.
 #
 # Events emitted (all on the worker's or the watcher's stack, all
 # synchronous — see EventBus):
 #   "index.updated"  a file's definitions swapped in (payload: path)
-#   "queue.changed"  a job started or finished (payload: nil)
+#   "queue.changed"  a job started, finished or was appended (payload: nil)
 
 require "./event_bus"
 require "./gitignore"
@@ -24,17 +31,18 @@ require "./symbol_index"
 module Kodkod
   class IndexQueue
     # One indexing unit: every file under one folder (a :scan job,
-    # built by the initial walk or a new-directory event) or a single
-    # file (a :change job from an fs event).
+    # walked lazily by the worker) or a single file (a :change job
+    # from a debounced fs event).
     class Job
-      getter folder : String    # absolute — the job's display unit
-      getter files : Array(String) # absolute paths, in walk order
-      getter reason : Symbol    # :scan | :change
+      getter folder : String          # absolute — the job's display unit
+      property files : Array(String)  # absolute paths, filled by the walk
+      getter reason : Symbol          # :scan | :change
       property state : Symbol = :pending # :pending | :running | :done
       property done : Int32 = 0
+      property? walked : Bool         # false until the worker walked it
 
       def initialize(@folder : String, @files : Array(String),
-                     @reason : Symbol = :scan)
+                     @reason : Symbol = :scan, @walked : Bool = true)
       end
 
       def total : Int32
@@ -58,6 +66,13 @@ module Kodkod
     # Files over this size skip extraction — the regex pass is
     # synchronous; a vendored 20 MB minified blob is not worth it.
     MAX_FILE_BYTES = 1_000_000_i64
+    # The worker's cooperative time budget: after this long without a
+    # yield the scheduler gets control back so the UI fiber keeps its
+    # frames, whatever the file sizes in flight.
+    SLICE = 8.milliseconds
+    # fs events sit in @dirty this long before becoming :change jobs —
+    # a save storm or a checkout collapses into one job per file.
+    DEBOUNCE = 300.milliseconds
 
     getter jobs : Array(Job) = [] of Job
     getter root : String? = nil
@@ -66,20 +81,29 @@ module Kodkod
     def initialize(@index : SymbolIndex, @bus : EventBus,
                    @lang_for : String -> String? = ->(path : String) {
                      nil.as(String?)
-                   })
+                   },
+                   @prio_for : -> String? = ->{ nil.as(String?) })
       @running = false
+      @remaining = MAX_FILES
+      @dirty = [] of String
+      @debounce_armed = false
+      @slice_end = Time.instant
       @bus.on("index.fs") { |path| on_fs_event(path.to_s) }
       @bus.on("index.overflow") { rebuild }
     end
 
-    # Point the queue at a new project root: drop everything, rebuild
-    # the default per-folder jobs, wake a worker.
+    # Point the queue at a new project root: drop everything, build
+    # the lazy per-folder jobs from the root's own listing, wake a
+    # worker. The recursive walks happen on the worker, not here.
     def start(root : String) : Nil
       @generation += 1
       @root = root
       @jobs.clear
       @index.clear
-      @jobs.concat(self.class.scan_jobs(root))
+      @dirty.clear
+      @debounce_armed = false
+      @remaining = MAX_FILES
+      @jobs.concat(self.class.initial_jobs(root))
       @bus.emit("queue.changed")
       spawn_worker
     end
@@ -101,11 +125,12 @@ module Kodkod
       @jobs.find { |j| j.state == :running }
     end
 
-    # --- the default queue: a gitignore-aware walk -------------------
+    # --- the default queue: the root's own listing --------------------
 
-    # One job per top-level folder (plus the root's loose files),
-    # nested .gitignores honored — the queue the Indexing page shows.
-    def self.scan_jobs(root : String) : Array(Job)
+    # One lazy :scan job per non-ignored top-level folder (plus the
+    # root's loose files, known immediately) — the worker does the
+    # recursive gitignore-aware walking when the job runs.
+    def self.initial_jobs(root : String) : Array(Job)
       jobs = [] of Job
       ignores = Gitignore.load(File.join(root, ".gitignore"))
       root_files = [] of String
@@ -121,16 +146,10 @@ module Kodkod
         if File.symlink?(path)
           next
         elsif File.directory?(path)
-          files = [] of String
-          ignores = Gitignore.load(File.join(root, ".gitignore"))
-          stack = [] of {String, Gitignore?}
-          stack << {path, ignores}
-          collect(path, stack, files, 0)
-          jobs << Job.new(path, files) unless files.empty?
+          jobs << Job.new(path, [] of String, walked: false)
         elsif File.file?(path)
           root_files << path
         end
-        break if root_files.size + jobs.sum(&.total) >= MAX_FILES
       end
       jobs.unshift(Job.new(root, root_files)) unless root_files.empty?
       jobs
@@ -138,10 +157,12 @@ module Kodkod
 
     # Recursive walk under `dir`, honoring the .gitignore stack
     # (deepest decisive match wins), hidden entries and symlink loops.
-    def self.collect(dir : String,
-                             stack : Array({String, Gitignore?}),
-                             acc : Array(String), depth : Int32) : Nil
-      return if depth >= MAX_DEPTH || acc.size >= MAX_FILES
+    # Runs on the worker fiber and time-slices like everything else;
+    # the MAX_FILES budget is shared across all of a root's jobs.
+    private def collect(dir : String,
+                        stack : Array({String, Gitignore?}),
+                        acc : Array(String), depth : Int32) : Nil
+      return if depth >= MAX_DEPTH || @remaining <= 0
       nested = Gitignore.load(File.join(dir, ".gitignore"))
       here = [{dir, nested}] + stack
       Dir.each_child(dir) do |name|
@@ -154,8 +175,10 @@ module Kodkod
           collect(path, here, acc, depth + 1)
         elsif File.file?(path)
           acc << path
+          @remaining -= 1
         end
-        return if acc.size >= MAX_FILES
+        return if @remaining <= 0
+        slice_yield
       end
     rescue File::Error | IO::Error
       # An unreadable subtree is skipped, not fatal.
@@ -165,8 +188,8 @@ module Kodkod
     # reads as "not ignored" only if the deeper file says so — the
     # basic-tier simplification (a negation cannot override a parent
     # ignore; real git can).
-    private def self.ignored_by?(stack : Array({String, Gitignore?}),
-                                 path : String, dir : Bool) : Bool
+    private def ignored_by?(stack : Array({String, Gitignore?}),
+                            path : String, dir : Bool) : Bool
       stack.reverse_each do |base, gi|
         next unless gi
         rel = path.lchop(base).lchop('/')
@@ -178,33 +201,57 @@ module Kodkod
     # --- fs-event intake ----------------------------------------------
 
     # A watch event landed (file modified/created, or a directory
-    # created — scanned so its files join the index). Deleted paths
-    # drop out of the index directly.
+    # created — its walk job joins the queue). File events are
+    # DEBOUNCED: the path lands in @dirty and becomes one :change job
+    # when the burst settles. Deleted paths drop out of the index
+    # directly.
     private def on_fs_event(path : String) : Nil
       root = @root || return
       return unless path.starts_with?(root)
       if File.directory?(path)
-        files = [] of String
-        ignores = Gitignore.load(File.join(root, ".gitignore"))
-        stack = [] of {String, Gitignore?}
-        stack << {path, ignores}
-        self.class.collect(path, stack, files, 0)
-        return if files.empty?
         unless @jobs.any? { |j| j.scan? && j.active? &&
                                 j.folder == path }
-          @jobs << Job.new(path, files)
+          @jobs << Job.new(path, [] of String, walked: false)
+          @bus.emit("queue.changed")
           spawn_worker
         end
       elsif File.file?(path)
-        unless @jobs.any? { |j| !j.scan? && j.active? &&
-                                j.files == [path] }
-          @jobs << Job.new(path, [path], :change)
-          spawn_worker
-        end
+        return if @dirty.includes?(path) ||
+                  @jobs.any? { |j| !j.scan? && j.active? &&
+                                    j.files.size == 1 && j.files.first == path }
+        @dirty << path
+        arm_debounce
       else # gone: deleted or renamed away
         @index.remove(path)
         @bus.emit("index.updated", path)
       end
+    end
+
+    # One timer fiber per burst: when it fires, the whole @dirty set
+    # becomes :change jobs at once (see flush).
+    private def arm_debounce : Nil
+      return if @debounce_armed
+      @debounce_armed = true
+      gen = @generation
+      spawn(name: "kodkod-index-flush") do
+        sleep DEBOUNCE
+        flush if @generation == gen
+      end
+    end
+
+    # Turn the debounced dirty set into :change jobs (the timer's
+    # callback; safe to call any time — the tests pump it directly).
+    def flush : Nil
+      @debounce_armed = false
+      paths, @dirty = @dirty, [] of String
+      return if paths.empty? || @root.nil?
+      paths.each do |p|
+        next if @jobs.any? { |j| !j.scan? && j.active? &&
+                                j.files.size == 1 && j.files.first == p }
+        @jobs << Job.new(p, [p], :change)
+      end
+      @bus.emit("queue.changed")
+      spawn_worker
     end
 
     # --- the worker ----------------------------------------------------
@@ -217,16 +264,18 @@ module Kodkod
     end
 
     private def run(gen : Int32) : Nil
+      reset_slice
       while @generation == gen
-        job = @jobs.find { |j| j.state == :pending } || break
+        job = next_job || break
         job.state = :running
         @bus.emit("queue.changed")
+        walk(job) unless job.walked?
         job.files.each do |path|
           break unless @generation == gen
           index_file(path)
           job.done += 1
           @bus.emit("index.updated", path)
-          Fiber.yield # keep the UI fiber fed
+          slice_yield
         end
         # A generation bump mid-job leaves it :running; the rescan's
         # start() cleared @jobs anyway, so only mark done in this gen.
@@ -234,6 +283,33 @@ module Kodkod
         @bus.emit("queue.changed")
       end
       @running = false
+    end
+
+    # The next job to run: a pending job covering the active editor's
+    # file jumps the queue (a :change for it first, then its :scan
+    # folder), else insertion order.
+    private def next_job : Job?
+      if (prio = @prio_for.call)
+        hit = @jobs.find { |j| j.state == :pending && !j.scan? &&
+                               j.files.size == 1 && j.files.first == prio } ||
+              @jobs.find { |j| j.state == :pending && j.scan? &&
+                               prio.starts_with?(j.folder) }
+        return hit if hit
+      end
+      @jobs.find { |j| j.state == :pending }
+    end
+
+    # Fill a lazy scan job's file list: the recursive walk, on the
+    # worker fiber, time-sliced like everything else.
+    private def walk(job : Job) : Nil
+      root = @root.not_nil!
+      files = [] of String
+      stack = [] of {String, Gitignore?}
+      stack << {job.folder, Gitignore.load(File.join(root, ".gitignore"))}
+      collect(job.folder, stack, files, 0)
+      job.files = files
+      job.walked = true
+      @bus.emit("queue.changed") # the Indexing page's totals wake up
     end
 
     def index_file(path : String) : Nil
@@ -246,10 +322,24 @@ module Kodkod
       rescue IO::Error | File::Error
         return
       end
-      defs = SymbolExtractor.extract(text, lang).map do |h|
+      defs = SymbolExtractor.extract(text, lang) { slice_yield }.map do |h|
         SymbolIndex::Def.new(h.name, h.kind, path, h.line, h.col)
       end
       @index.replace(path, defs)
+    end
+
+    # --- cooperative time budget ---------------------------------------
+
+    private def reset_slice : Nil
+      @slice_end = Time.instant + SLICE
+    end
+
+    # Yield to the scheduler once this slice's budget is spent — the
+    # UI fiber gets its frame, then a fresh budget starts.
+    private def slice_yield : Nil
+      return if Time.instant < @slice_end
+      Fiber.yield
+      @slice_end = Time.instant + SLICE
     end
   end
 end

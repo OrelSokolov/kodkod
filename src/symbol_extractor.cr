@@ -25,6 +25,9 @@ module Kodkod
     # megabyte the synchronous tokenization stops being pocket
     # change; the raw pass still runs.
     TOKEN_MAX_CHARS = 512_000
+    # The clock-budgeted indexer calls the extract block every this
+    # many lines — a cooperative fiber's chance to yield mid-file.
+    CHECKPOINT_LINES = 512
 
     struct Hit
       getter name : String
@@ -148,6 +151,13 @@ module Kodkod
 
     # All definition hits in `text` for `lang` (nil / unknown → none).
     def self.extract(text : String, lang : String?) : Array(Hit)
+      extract(text, lang) { }
+    end
+
+    # The checkpointed variant: `tick` runs every CHECKPOINT_LINES
+    # lines so a caller on a cooperative fiber can yield inside huge
+    # files (the indexer passes its clock-budgeted slice gate).
+    def self.extract(text : String, lang : String?, &tick : ->) : Array(Hit)
       return [] of Hit unless lang && (pats = PATTERNS[lang]?)
       spans = spans_for(text, lang)
       keywords = keywords_for(lang)
@@ -156,6 +166,7 @@ module Kodkod
       off = 0 # char offset of the current line's start
       text.each_line do |line|
         no += 1
+        tick.call if no % CHECKPOINT_LINES == 0
         pats.each do |pat|
           if (m = pat.regex.match(line)) && (name = m[1]?)
             next if pat.kind == :function && C_NOT_FUNC.includes?(name)

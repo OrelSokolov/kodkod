@@ -38,11 +38,16 @@ describe Kodkod::IndexQueue do
       File.write(File.join(root, "vendor", "v.cr"), "def v\nend\n")
       File.write(File.join(root, "skipped", "s.cr"), "def s\nend\n")
       begin
-        jobs = Kodkod::IndexQueue.scan_jobs(root)
-        # One job for the root's loose files + one per live top dir.
-        folders = jobs.map { |j| j.folder == root ? "." : File.basename(j.folder) }.sort
+        bus = Kodkod::EventBus.new
+        index = Kodkod::SymbolIndex.new
+        q = Kodkod::IndexQueue.new(index, bus, ->lang_for(String))
+        q.start(root)
+        drain_queue(q)
+        # One job for the root's loose files + one per live top dir,
+        # walked lazily by the worker.
+        folders = q.jobs.map { |j| j.folder == root ? "." : File.basename(j.folder) }.sort
         folders.should eq([".", "src"])
-        files = jobs.flat_map(&.files).map { |p| p.lchop(root + "/") }.sort
+        files = q.jobs.flat_map(&.files).map { |p| p.lchop(root + "/") }.sort
         files.should eq(["main.cr", "src/app.cr", "src/deep/low.py"])
       ensure
         FileUtils.rm_rf(root)
@@ -95,11 +100,65 @@ describe Kodkod::IndexQueue do
 
         File.write(path, "def after\nend\n")
         bus.emit("index.fs", path)
+        q.flush # the debounce timer's callback, pumped by hand
         drain_queue(q)
         index.has_name?("before").should be_false
         index.has_name?("after").should be_true
         # A :change job joined the queue and finished.
         q.jobs.count { |j| !j.scan? && j.state == :done }.should eq(1)
+      ensure
+        FileUtils.rm_rf(root)
+      end
+    end
+  end
+
+  it "coalesces a save storm into one change job" do
+    Dir.tempdir.tap do |tmp|
+      root = File.join(tmp, "kodkod-iq-#{rand(1_000_000)}")
+      FileUtils.mkdir_p(root)
+      path = File.join(root, "a.cr")
+      File.write(path, "def v1\nend\n")
+      begin
+        bus = Kodkod::EventBus.new
+        index = Kodkod::SymbolIndex.new
+        q = Kodkod::IndexQueue.new(index, bus, ->lang_for(String))
+        q.start(root)
+        drain_queue(q)
+
+        3.times do |i|
+          File.write(path, "def v#{i + 1}\nend\n")
+          bus.emit("index.fs", path)
+        end
+        q.flush
+        drain_queue(q)
+        index.has_name?("v3").should be_true
+        q.jobs.count { |j| !j.scan? && j.state == :done }.should eq(1)
+      ensure
+        FileUtils.rm_rf(root)
+      end
+    end
+  end
+
+  it "indexes the active file's folder first" do
+    Dir.tempdir.tap do |tmp|
+      root = File.join(tmp, "kodkod-iq-#{rand(1_000_000)}")
+      FileUtils.mkdir_p(File.join(root, "aaa"))
+      FileUtils.mkdir_p(File.join(root, "zzz"))
+      File.write(File.join(root, "aaa", "a.cr"), "def a\nend\n")
+      File.write(File.join(root, "zzz", "z.cr"), "def z\nend\n")
+      begin
+        bus = Kodkod::EventBus.new
+        index = Kodkod::SymbolIndex.new
+        updated = [] of String?
+        bus.on("index.updated") { |p| updated << p }
+        active = File.join(root, "zzz", "z.cr")
+        q = Kodkod::IndexQueue.new(index, bus, ->lang_for(String),
+          ->{ active.as(String?) })
+        q.start(root)
+        drain_queue(q)
+        # The zzz job covered the active file, so z.cr indexed first.
+        updated.first.should eq(active)
+        q.jobs.all?(&.state.== :done).should be_true
       ensure
         FileUtils.rm_rf(root)
       end

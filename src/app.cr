@@ -252,8 +252,10 @@ class KodkodApp < Egui::App
     # The project index: watcher → bus → queue → index → repaint. The
     # subscriptions run on whichever fiber emits (safe cooperatively —
     # handlers only touch state and request a repaint, never yield).
+    # The queue also asks for the active tab's path so the job
+    # covering the edited file jumps the queue.
     @index_queue = Kodkod::IndexQueue.new(@index, @bus,
-      ->lang_for(String))
+      ->lang_for(String), ->active_path)
     @symbol_browser = Kodkod::SymbolBrowser.new(@index)
     @bus.on("index.updated") { |_| ctx.request_repaint }
     @bus.on("queue.changed") do |_|
@@ -665,8 +667,13 @@ class KodkodApp < Egui::App
           if @index_queue.busy?
             if (job = @index_queue.current)
               rel = job.folder == root ? "." : job.folder.lchop(root + "/")
-              ui.label(t("indexing.current", folder: rel,
-                done: job.done, total: job.total))
+              if job.total.zero?
+                # A lazy scan job mid-walk: files still being counted.
+                ui.label(t("indexing.walking", folder: rel))
+              else
+                ui.label(t("indexing.current", folder: rel,
+                  done: job.done, total: job.total))
+              end
               bar_w = 280.0
               frac = job.total.zero? ? 1.0 : job.done.to_f64 / job.total
               rect = ui.allocate_at_least(Egui::Vec2.new(bar_w, 8.0))
@@ -967,6 +974,12 @@ class KodkodApp < Egui::App
 
   private def lang_for(path : String) : String?
     self.class.lang_for(path)
+  end
+
+  # The active tab's path — the indexer's priority hint: pending jobs
+  # covering the file being edited jump the queue.
+  private def active_path : String?
+    @docs[selected]?.try(&.path)
   end
 
   # Extension/basename → syntax language (shared by the editor tabs
