@@ -100,6 +100,7 @@ class KodkodApp < Egui::App
     "rakefile"    => "ruby",
     "gemfile"     => "ruby",
     "vagrantfile" => "ruby",
+    ".gitignore"  => "gitignore",
   }
 
   TEXT_MIME_EXTRAS = {"application/json", "application/xml",

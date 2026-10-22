@@ -42,6 +42,8 @@ describe "language detection" do
     app.lang_for("Vagrantfile").should eq("ruby")
     app.lang_for("/build/dir/GNUmakefile").should eq("makefile")
     app.lang_for("makefile").should eq("makefile")
+    app.lang_for("/proj/.gitignore").should eq("gitignore")
+    app.lang_for("sub/dir/.gitignore").should eq("gitignore")
   end
 
   it "leaves unknown files plain" do

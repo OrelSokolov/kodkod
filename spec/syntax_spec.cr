@@ -170,6 +170,26 @@ describe Kodkod::Syntax do
       token_with(tokens, "`t`").not_nil!.scope.should eq("string")
       token_with(tokens, "1").not_nil!.scope.should eq("number")
     end
+
+    it "classifies gitignore comments, negations, globs, escapes" do
+      code = "# build artifacts\n" \
+             "*.o\n" \
+             "!important.log\n" \
+             "\\#notes\n" \
+             "**/logs\n" \
+             "[ab]/*.tmp\n"
+      tokens = Kodkod::Syntax.highlight(code, "gitignore").not_nil!
+      token_with(tokens, "# build artifacts").not_nil!.scope.should eq("comment")
+      token_with(tokens, "!").not_nil!.scope.should eq("keyword")
+      token_with(tokens, "*").not_nil!.scope.should eq("regexp")
+      token_with(tokens, "**").not_nil!.scope.should eq("regexp")
+      token_with(tokens, "\\#").not_nil!.scope.should eq("char.escape")
+      tokens_join(tokens).should eq(code)
+    end
+
+    it "resolves the gitignore alias" do
+      Kodkod::Syntax["ignore"].should eq(Kodkod::Syntax["gitignore"])
+    end
   end
 
   it "maps scopes to palette colors with prefix fallback" do

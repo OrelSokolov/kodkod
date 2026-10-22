@@ -7,6 +7,7 @@
 require "highlight_cr"
 require "./syntax/palette"
 require "./syntax/grammars/crystal"
+require "./syntax/grammars/gitignore"
 
 module Kodkod
   module Syntax
