@@ -42,6 +42,7 @@
 
 require "egui-cr/egui"
 require "fswatch"
+require "./watch_filter"
 
 module Kodkod
   class FileTree
@@ -123,12 +124,17 @@ module Kodkod
     # (Re)start the root watch when the workspace folder changes. The
     # recursive watch covers directories as they appear, so nothing
     # registers per listing (unlike the old per-directory inotify
-    # scheme this replaces).
+    # scheme this replaces). Arming skips hidden and root-.gitignore'd
+    # subtrees (WatchFilter): their listings fall back to the RECHECK
+    # mtime poll — a 0.5s staleness on vendored noise instead of
+    # thousands of kernel watches.
     def self.ensure_watch(root : String) : Nil
       return if @@fs_root == root && @@fs_watch
       @@fs_watch.try(&.stop)
       @@fs_root = root
-      @@fs_watch = FSWatch.watch(root) { |event| on_fs_event(event) }
+      @@fs_watch = FSWatch.watch(root, skip: WatchFilter.skip_proc(root)) { |event|
+        on_fs_event(event)
+      }
     end
 
     private def self.on_fs_event(event : FSWatch::Event) : Nil

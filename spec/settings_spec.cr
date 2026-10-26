@@ -31,15 +31,18 @@ describe "settings page" do
     5.times { |i| settings_frame(app, ctx, time: 0.016 * (i + 1)) }
     ctx.router.navigate("root/settings")
     settings_frame(app, ctx, time: 0.1)
+    # Let the default-open expanders finish their reveal (one measuring
+    # frame + the 0.2 s slide) before sweeping the pointer.
+    20.times { |i| settings_frame(app, ctx, time: 0.12 + 0.016 * (i + 1)) }
 
     before = {app.vim.enabled?, app.settings.show_hidden,
               app.settings.show_explorer, app.settings.cursor_blinks}
     8.times do |i|
-      # sweep the pointer across the selectable labels, one move/frame
+      # sweep the pointer across the toggle rows, one move/frame
       settings_frame(app, ctx,
         events: [Egui::Event.pointer_moved(
           Egui::Pos2.new(300.0, 170.0 + (i % 4) * 30.0))],
-        time: 0.12 + 0.016 * (i + 1))
+        time: 0.4 + 0.016 * (i + 1))
     end
     after = {app.vim.enabled?, app.settings.show_hidden,
              app.settings.show_explorer, app.settings.cursor_blinks}
@@ -54,7 +57,15 @@ describe "settings page" do
     ctx = Egui::Context.new
     3.times { |i| settings_frame(app, ctx, time: 0.016 * (i + 1)) }
     ctx.router.navigate("root/settings")
-    cmds = settings_frame(app, ctx, time: 0.1)
+    now = 0.1
+    cmds = settings_frame(app, ctx, time: now)
+    # Pump the clock (monotonic — animations read it) past the expanders'
+    # reveal: one measuring frame paints nothing, then a 0.2 s slide
+    # during which the content clip still swallows clicks.
+    25.times do
+      now += 0.016
+      cmds = settings_frame(app, ctx, time: now)
+    end
 
     # Locate the label from the frame's own paint commands — the
     # layout position is the page's business, not the spec's.
@@ -68,11 +79,13 @@ describe "settings page" do
     click = [Egui::Event.pointer_moved(pos),
              Egui::Event.pointer_pressed(pos),
              Egui::Event.pointer_released(pos)]
-    settings_frame(app, ctx, events: click, time: 0.12)
+    now += 0.016
+    settings_frame(app, ctx, events: click, time: now)
     app.vim.enabled?.should eq(!was)
 
     # Back to the saved state (the click persisted the flip).
-    settings_frame(app, ctx, events: click, time: 0.14)
+    now += 0.016
+    settings_frame(app, ctx, events: click, time: now)
     app.vim.enabled?.should eq(was)
   end
 end

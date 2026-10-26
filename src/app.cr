@@ -20,6 +20,7 @@ require "./vim_command"
 require "./vim_mode"
 require "./event_bus"
 require "./gitignore"
+require "./watch_filter"
 require "./symbol_index"
 require "./symbol_extractor"
 require "./index_queue"
@@ -40,6 +41,10 @@ class KodkodApp < Egui::App
     property highlight_cursor_line : Bool = true
     property syntax_highlight : Bool = true
     property goto_def : Bool = true
+    # Off by default as a DIAGNOSTIC: indexing does not start when a
+    # folder opens — only from the Indexing page's Reindex button —
+    # until the freeze-on-heavy-projects cause is pinned down.
+    property autoindex : Bool = false
     property language : String = "en"
 
     def initialize(@theme : String = "Dark", @vim : Bool = true,
@@ -49,6 +54,7 @@ class KodkodApp < Egui::App
                    @highlight_cursor_line : Bool = true,
                    @syntax_highlight : Bool = true,
                    @goto_def : Bool = true,
+                   @autoindex : Bool = false,
                    @language : String = "en")
     end
   end
@@ -100,6 +106,8 @@ class KodkodApp < Egui::App
     "rakefile"    => "ruby",
     "gemfile"     => "ruby",
     "vagrantfile" => "ruby",
+    "dockerfile"  => "dockerfile",
+    "containerfile" => "dockerfile",
     ".gitignore"  => "gitignore",
   }
 
@@ -109,6 +117,12 @@ class KodkodApp < Egui::App
                       # `file` reports an EMPTY file as inode/x-empty —
                       # it is still a perfectly editable text file.
                       "inode/x-empty"}
+
+  # Plain-text extensions that need no mime sniffing at all (the
+  # syntax-registered code extensions are covered by lang_for).
+  PLAIN_TEXT_EXT = {".txt", ".text", ".log", ".csv", ".tsv", ".cfg",
+                    ".conf", ".ini", ".env", ".lock", ".editorconfig",
+                    ".gitattributes"}
 
   # One open document: a rope buffer (text tab) or a FileViewer
   # (image tab), plus the text tab's STABLE widget focus id (an index
@@ -254,8 +268,23 @@ class KodkodApp < Egui::App
     # handlers only touch state and request a repaint, never yield).
     # The queue also asks for the active tab's path so the job
     # covering the edited file jumps the queue.
+    #
+    # The walk/extraction backend: the sidecar process in production
+    # (the app re-execs itself — see src/index_worker.cr), the
+    # in-process Local under `crystal spec`/`crystal run` (the temp
+    # crystal-run binary would choke on --index-worker — Crystal sets
+    # no `spec` compile flag, so this is a runtime check) and whenever
+    # the binary path is unknowable.
+    index_backend : ((String -> String?) -> Kodkod::IndexWorker::Backend) =
+      ->(lang_for : String -> String?) : Kodkod::IndexWorker::Backend {
+        if (exe = Process.executable_path) && !exe.includes?("crystal-run")
+          Kodkod::IndexWorker::Client.new(exe, ["--index-worker"])
+        else
+          Kodkod::IndexWorker::Local.new(lang_for)
+        end
+      }
     @index_queue = Kodkod::IndexQueue.new(@index, @bus,
-      ->lang_for(String), ->active_path)
+      ->lang_for(String), ->active_path, index_backend)
     @symbol_browser = Kodkod::SymbolBrowser.new(@index)
     @bus.on("index.updated") { |_| ctx.request_repaint }
     @bus.on("queue.changed") do |_|
@@ -283,7 +312,7 @@ class KodkodApp < Egui::App
 
     if dir && Dir.exists?(dir)
       @folder = File.expand_path(dir)
-      start_indexing(@folder.not_nil!)
+      start_indexing(@folder.not_nil!) if @settings.autoindex
     end
     if files.empty?
       @docs << make_doc(Kodkod::EditorBuffer.new(
@@ -606,49 +635,65 @@ class KodkodApp < Egui::App
 
       r.page "root/settings", title: t("settings.title") do |ui|
         ui.heading(t("settings.title"))
-        ui.label(t("settings.theme"))
-        ui.combo_box("theme", @settings.theme, THEMES) do |name|
-          @settings.theme = name
-          save_settings
+        ui.expander(t("settings.appearance"), default_open: true) do |body|
+          body.label(t("settings.theme"))
+          body.combo_box("theme", @settings.theme, THEMES) do |name|
+            @settings.theme = name
+            save_settings
+          end
+          body.label(t("settings.language"))
+          current = Kodkod::I18n::LANGUAGES.fetch(@settings.language,
+            @settings.language)
+          body.combo_box("language", current,
+            Kodkod::I18n::LANGUAGES.values) do |name|
+            if (code = Kodkod::I18n::LANGUAGES.key_for?(name))
+              @settings.language = code
+              @i18n.locale = code
+              save_settings
+            end
+          end
         end
-        ui.label(t("settings.language"))
-        current = Kodkod::I18n::LANGUAGES.fetch(@settings.language,
-          @settings.language)
-        ui.combo_box("language", current,
-          Kodkod::I18n::LANGUAGES.values) do |name|
-          if (code = Kodkod::I18n::LANGUAGES.key_for?(name))
-            @settings.language = code
-            @i18n.locale = code
+        ui.expander(t("settings.editor"), default_open: true) do |body|
+          body.toggle_button(@vim.enabled?, t("settings.vim")) do |_on|
+            toggle_vim
+          end
+          body.toggle_button(@settings.cursor_blinks,
+            t("settings.blink")) do |on|
+            @settings.cursor_blinks = on
+            save_settings
+          end
+          body.toggle_button(@settings.highlight_cursor_line,
+            t("settings.cursor_line")) do |on|
+            @settings.highlight_cursor_line = on
+            save_settings
+          end
+          body.toggle_button(@settings.syntax_highlight,
+            t("settings.syntax")) do |on|
+            @settings.syntax_highlight = on
+            save_settings
+          end
+          body.toggle_button(@settings.goto_def,
+            t("settings.goto_def")) do |on|
+            @settings.goto_def = on
             save_settings
           end
         end
-        ui.separator
-        if ui.selectable_label(@vim.enabled?, t("settings.vim")).clicked?
-          toggle_vim
-        end
-        if ui.selectable_label(@settings.show_hidden, t("settings.hidden")).clicked?
-          @settings.show_hidden = !@settings.show_hidden
-          save_settings
-        end
-        if ui.selectable_label(@settings.show_explorer, t("settings.explorer")).clicked?
-          @settings.show_explorer = !@settings.show_explorer
-          save_settings
-        end
-        if ui.selectable_label(@settings.cursor_blinks, t("settings.blink")).clicked?
-          @settings.cursor_blinks = !@settings.cursor_blinks
-          save_settings
-        end
-        if ui.selectable_label(@settings.highlight_cursor_line, t("settings.cursor_line")).clicked?
-          @settings.highlight_cursor_line = !@settings.highlight_cursor_line
-          save_settings
-        end
-        if ui.selectable_label(@settings.syntax_highlight, t("settings.syntax")).clicked?
-          @settings.syntax_highlight = !@settings.syntax_highlight
-          save_settings
-        end
-        if ui.selectable_label(@settings.goto_def, t("settings.goto_def")).clicked?
-          @settings.goto_def = !@settings.goto_def
-          save_settings
+        ui.expander(t("settings.project"), default_open: true) do |body|
+          body.toggle_button(@settings.show_hidden,
+            t("settings.hidden")) do |on|
+            @settings.show_hidden = on
+            save_settings
+          end
+          body.toggle_button(@settings.show_explorer,
+            t("settings.explorer")) do |on|
+            @settings.show_explorer = on
+            save_settings
+          end
+          body.toggle_button(@settings.autoindex,
+            t("settings.autoindex")) do |on|
+            @settings.autoindex = on
+            save_settings
+          end
         end
         ui.separator
         ui.label(t("settings.deeplink"))
@@ -684,8 +729,29 @@ class KodkodApp < Egui::App
                 Egui::Vec2.new(rect.width * frac.clamp(0.0, 1.0),
                   rect.height)), 4.0, visuals.hyperlink_color)
             end
+          elsif @index_queue.paused?
+            ui.label(t("indexing.paused"))
           else
             ui.label(t("indexing.idle"))
+          end
+          # Pause holds the queue (pending jobs wait, applied records
+          # stay); stop drops everything still owed. Both only make
+          # sense while there is something in flight or on hold.
+          if @index_queue.busy? || @index_queue.paused?
+            ui.horizontal do |row|
+              if @index_queue.paused?
+                if row.button(t("indexing.resume")).clicked?
+                  @index_queue.resume
+                end
+              else
+                if row.button(t("indexing.pause")).clicked?
+                  @index_queue.pause
+                end
+              end
+              if row.button(t("indexing.stop")).clicked?
+                @index_queue.stop
+              end
+            end
           end
           pending = @index_queue.pending
           if job = @index_queue.current
@@ -813,11 +879,15 @@ class KodkodApp < Egui::App
   # --- project index / go-to-definition -----------------------------
 
   # Start (or restart) indexing for a workspace folder: the recursive
-  # watch feeds the bus, the queue builds its per-folder jobs.
+  # watch feeds the bus, the queue builds its per-folder jobs. The
+  # watch skips hidden and root-.gitignore'd subtrees (WatchFilter) —
+  # the indexer never reads those files anyway, and arming them would
+  # walk the whole vendored tree on the UI fiber.
   private def start_indexing(folder : String) : Nil
     unless (w = @folder_watch) && w.path == folder && !w.stopped?
       @folder_watch.try(&.stop)
-      @folder_watch = FSWatch.watch(folder) { |e| on_index_fs_event(e) }
+      @folder_watch = FSWatch.watch(folder,
+        skip: Kodkod::WatchFilter.skip_proc(folder)) { |e| on_index_fs_event(e) }
     end
     @index_queue.start(folder)
     @status = t("status.index_started", folder: File.basename(folder))
@@ -986,7 +1056,18 @@ class KodkodApp < Egui::App
   # and the project indexer).
   def self.lang_for(path : String) : String?
     LANG_BY_EXT[File.extname(path).downcase]? ||
-      LANG_BY_NAME[File.basename(path).downcase]?
+      LANG_BY_NAME[File.basename(path).downcase]? ||
+      dockerfile_with_suffix?(path)
+  end
+
+  # Dockerfiles name their variants with a stage suffix instead of a
+  # real extension (Dockerfile.dev, Containerfile.prod) — the suffix
+  # is part of the name, not an extension.
+  private def self.dockerfile_with_suffix?(path : String) : String?
+    base = File.basename(path).downcase
+    if base.starts_with?("dockerfile.") || base.starts_with?("containerfile.")
+      "dockerfile"
+    end
   end
 
   # The About modal (a routed page — see Kodkod::About).
@@ -1062,7 +1143,7 @@ class KodkodApp < Egui::App
       if path
         @folder = path
         @status = t("status.folder", path: path)
-        start_indexing(path)
+        start_indexing(path) if @settings.autoindex
       end
     end
   end
@@ -1650,7 +1731,12 @@ class KodkodApp < Egui::App
     MIME.from_filename?(path) || ""
   end
 
+  # Known text by extension — no `file` fork (each fork+exec is a
+  # UI-fiber stall on the order of milliseconds per opened file).
+  # Unknown extensions still fall through to the real sniff.
   def self.text_mime?(path : String) : Bool
+    return true if lang_for(path)
+    return true if PLAIN_TEXT_EXT.includes?(File.extname(path).downcase)
     mime = mime_type(path)
     mime.starts_with?("text/") || TEXT_MIME_EXTRAS.includes?(mime)
   end

@@ -9,6 +9,11 @@ class IndexTestApp < KodkodApp
   def index; @index; end
   def index_queue; @index_queue; end
   def status; @status; end
+
+  # Autoindex is off by default — the test starts it by hand.
+  def start_index!(folder : String) : Nil
+    start_indexing(folder)
+  end
 end
 
 ISCREEN = Egui::Rect.from_min_size(Egui::Pos2.zero,
@@ -29,6 +34,7 @@ describe "app project indexing" do
       File.write(File.join(root, "src", "app.cr"), "module Demo\n  def helper\n  end\nend\n")
       begin
         app = IndexTestApp.new([] of String, dir: root)
+        app.start_index!(root)
         ctx = Egui::Context.new
         3.times { |i| index_frame(app, ctx, time: 0.016 * (i + 1)) }
         # Drain the worker fiber (cooperative: yield until idle).
@@ -58,9 +64,15 @@ end
 # Exposes the jump machinery for focus assertions.
 class JumpTestApp < KodkodApp
   def index; @index; end
+  def index_queue; @index_queue; end
   def docs; @docs; end
+
   def jump(d : Kodkod::SymbolIndex::Def) : Nil
     jump_to(d)
+  end
+
+  def start_index!(folder : String) : Nil
+    start_indexing(folder)
   end
 end
 
@@ -73,6 +85,13 @@ describe "jump caret visibility" do
       File.write(path, "def helper\nend\n")
       begin
         app = JumpTestApp.new([path] of String, dir: root)
+        app.start_index!(root)
+        # Drain the worker fiber (cooperative: yield until idle).
+        spins = 0
+        while app.index_queue.busy? && spins < 20_000
+          Fiber.yield
+          spins += 1
+        end
         ctx = Egui::Context.new
         3.times { |i| index_frame(app, ctx, time: 0.016 * (i + 1)) }
         # The file is the only (active) tab and its editor holds focus.

@@ -19,6 +19,17 @@ require "./quick_open"
 require "./vim_mode"
 require "./app"
 require "./cli"
+require "./index_worker"
+
+# The indexer sidecar: the app re-execs itself with --index-worker to
+# run the project walk + extraction in a SEPARATE process (single
+# threaded scheduler + Boehm GC — see src/index_worker.cr). Branch
+# BEFORE any sokol/egui init: the child stays headless and talks
+# line-JSON over stdin/stdout.
+if ARGV.includes?("--index-worker")
+  Kodkod::IndexWorker.run(STDIN, STDOUT, ->KodkodApp.lang_for(String))
+  exit
+end
 
 # Entry point: the framework CLI parse pulls --page out of ARGV (in
 # place — the file arguments left over go to the app).

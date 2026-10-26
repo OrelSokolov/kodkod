@@ -1,0 +1,367 @@
+From af335393ce06620826ba8b65da16947b57631191 Mon Sep 17 00:00:00 2001
+From: Oleg <oleg@localhost>
+Date: Mon, 26 Oct 2026 11:13:52 +0300
+Subject: [PATCH] Arm recursive watches on a fiber; add skip: subtree filter
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The recursive inotify arming walked the whole tree synchronously on
+the calling fiber — thousands of add_watch+stat syscalls that froze
+the host's UI on big projects. `add` now arms only the ROOT
+synchronously (the watched path is live the moment it returns) and
+walks the tree on an arming fiber that yields every 64 directories,
+so the caller never blocks and the scheduler is never starved.
+
+A new `skip:` filter on FSWatch.watch receives every child directory
+the arming is about to watch; a true return drops the subtree — no
+watch, no descent, no events from it. It also applies to directories
+discovered at runtime (a vendored tree materializing after the watch
+must not arm thousands of watches). poll/kqueue honor `skip:` too.
+---
+ spec/watch_spec.cr              | 35 +++++++++++++++
+ src/fswatch.cr                  | 23 ++++++++--
+ src/fswatch/backends/inotify.cr | 76 ++++++++++++++++++++++++++-------
+ src/fswatch/backends/kqueue.cr  |  9 +++-
+ src/fswatch/backends/poll.cr    | 15 ++++++-
+ src/fswatch/watch.cr            | 16 ++++++-
+ 6 files changed, 150 insertions(+), 24 deletions(-)
+
+diff --git a/spec/watch_spec.cr b/spec/watch_spec.cr
+index 9a6d998..cbada0c 100644
+--- a/spec/watch_spec.cr
++++ b/spec/watch_spec.cr
+@@ -64,4 +64,39 @@ describe FSWatch::Watch do
+       events.size.should eq(count)
+     end
+   end
++
++  it "skips subtrees the skip filter rejects" do
++    with_temp_dir do |dir|
++      vendored = File.join(dir, "node_modules", "pkg")
++      Dir.mkdir_p(vendored)
++      hidden = File.join(dir, ".cache")
++      Dir.mkdir(hidden)
++      events = [] of FSWatch::Event
++      watch = FSWatch.watch(dir,
++        skip: ->(p : String) {
++          p.includes?("node_modules") || p.includes?("/.cache")
++        }) { |e| events << e }
++
++      # The root itself stays live despite the filter.
++      File.touch(File.join(dir, "top.txt"))
++      eventually("top-level event never arrived") do
++        events.any? { |e| e.path.ends_with?("top.txt") && e.created? }
++      end
++
++      # Skipped subtrees never raise events (bounded wait, then
++      # silence is the assertion — nothing positive can arrive):
++      # pre-existing ones AND one materializing at runtime (its
++      # Created event on the armed root must not arm it).
++      File.touch(File.join(vendored, "v.txt"))
++      File.touch(File.join(hidden, "h.txt"))
++      late = File.join(dir, "node_modules-late")
++      Dir.mkdir(late)
++      File.touch(File.join(late, "l.txt"))
++      sleep 0.4.seconds
++      events.any? { |e| e.path.ends_with?("v.txt") || e.path.ends_with?("h.txt") ||
++                         e.path.ends_with?("l.txt") }
++        .should be_false
++      watch.stop
++    end
++  end
+ end
+diff --git a/src/fswatch.cr b/src/fswatch.cr
+index 796f82c..bf35c01 100644
+--- a/src/fswatch.cr
++++ b/src/fswatch.cr
+@@ -31,6 +31,18 @@
+ #   end
+ #   # ... later:
+ #   watch.stop
++#
++# `skip:` keeps a subtree off the watch tables entirely (no watch, no
++# descent, no events from it):
++#
++#   FSWatch.watch("proj", skip: ->(p : String) { p.includes?("/node_modules/") }) do |e|
++#     # ...
++#   end
++#
++# The watched ROOT is always armed synchronously; the recursive arming
++# of the tree beneath it runs on a fiber (inotify backend) — a huge
++# tree delays events for its deep pre-existing directories briefly,
++# never the caller.
+ 
+ require "./fswatch/event"
+ require "./fswatch/backend"
+@@ -50,9 +62,14 @@ module FSWatch
+   # recursively) and yield every change event to *handler*.
+   #
+   # `interval:` configures the Poll backend's tick (other backends
+-  # ignore it). Returns a `Watch` handle; call `#stop` to tear down.
++  # ignore it). `skip:` receives every child directory the recursive
++  # arming is about to watch (absolute path); a true return drops the
++  # subtree — no watch, no descent, no events from it. Returns a
++  # `Watch` handle; call `#stop` to tear down.
+   def self.watch(path : String, *, recursive : Bool = true,
+-                 interval : Time::Span? = nil, &handler : Event ->) : Watch
+-    Watch.new(path, recursive: recursive, interval: interval, &handler)
++                 interval : Time::Span? = nil,
++                 skip : (String -> Bool)? = nil,
++                 &handler : Event ->) : Watch
++    Watch.new(path, recursive: recursive, interval: interval, skip: skip, &handler)
+   end
+ end
+diff --git a/src/fswatch/backends/inotify.cr b/src/fswatch/backends/inotify.cr
+index a8faaf1..5be5521 100644
+--- a/src/fswatch/backends/inotify.cr
++++ b/src/fswatch/backends/inotify.cr
+@@ -2,11 +2,16 @@
+ # (no shard, no C shim). One inotify fd for the whole backend; the
+ # observation fiber evented-reads it (epoll) and decodes records.
+ #
+-# Recursion: inotify is not recursive, so `add` walks the tree adding
+-# a watch per directory, and Created/MovedTo + IsDir events add
+-# watches for directories that appear later. Known inotify race
+-# (documented by libfswatch too): children born between a
+-# directory's creation and the watch being armed are not reported.
++# Recursion: inotify is not recursive, so the tree gets a watch per
++# directory. `add` arms the ROOT synchronously (one cheap add_watch —
++# the watched path is live when it returns) and walks the tree on a
++# separate arming FIBER, yielding every YIELD_EVERY directories: a
++# host's calling fiber (often the UI) must not block on a huge tree,
++# and a walk that never yields would starve the whole scheduler.
++# Created/MovedTo + IsDir events add watches for directories that
++# appear later. Known inotify race (documented by libfswatch too):
++# children born between a directory's creation and the watch being
++# armed are not reported.
+ 
+ {% if flag?(:linux) %}
+   @[Link("c")]
+@@ -47,10 +52,12 @@ module FSWatch
+       @io : IO::FileDescriptor
+       @wd_paths = {} of Int32 => String
+       @path_wds = {} of String => Int32
++      @skip : (String -> Bool)?
+       @stopped = Atomic(Bool).new(false)
+ 
+       def initialize(@recursive : Bool, interval : Time::Span? = nil,
+-                     &@emit : Event ->)
++                     skip : (String -> Bool)? = nil, &@emit : Event ->)
++        @skip = skip
+         fd = LibInotify.init1(IN_NONBLOCK | IN_CLOEXEC)
+         raise IO::Error.new("inotify_init1(2) failed") if fd < 0
+         io = IO::FileDescriptor.new(fd)
+@@ -64,7 +71,12 @@ module FSWatch
+       end
+ 
+       def add(path : String) : Nil
+-        arm(path, report: false)
++        # The root is LIVE from here (the specs' and hosts' contract:
++        # events directly under it arrive immediately); only the
++        # descent is deferred — see the file header.
++        arm_one(path)
++        return unless @recursive
++        spawn(name: "fswatch-inotify-arm") { descend(path, report: false) }
+       end
+ 
+       # A directory discovered at RUNTIME (a Created/MovedTo event):
+@@ -73,21 +85,46 @@ module FSWatch
+       # born between the mkdir and the arming get no kernel event;
+       # e.g. a rapid mkdir -p a/b/c burst). Rare duplicates with
+       # kernel events are possible; a missing file is worse than a
+-      # repeated one (the trade-off libfswatch documents too).
++      # repeated one (the trade-off libfswatch documents too). Runs
++      # on the observation fiber; descend's yields keep a huge
++      # subtree from wedging event delivery. The skip filter applies
++      # to the discovered directory itself too — a runtime
++      # `mkdir node_modules` must not arm the whole vendored tree.
+       private def add_discovered(path : String) : Nil
+-        arm(path, report: true)
++        return if @skip.try &.call(path)
++        arm_one(path)
++        descend(path, report: true) if @recursive
+       end
+ 
+-      private def arm(path : String, report : Bool) : Nil
+-        return if @path_wds.has_key?(path)
++      # One watch on *path* — idempotent (false when it was already
++      # armed or could not be).
++      private def arm_one(path : String) : Bool
++        return false if @path_wds.has_key?(path)
+         wd = LibInotify.add_watch(@io.fd, path, WATCH_MASK)
+-        return if wd < 0 # permissions, watch-table full, vanished
++        return false if wd < 0 # permissions, watch-table full, vanished
+         @wd_paths[wd] = path
+         @path_wds[path] = wd
+-        return unless @recursive
+-        return unless directory?(path)
++        true
++      end
++
++      # Directories the descent arms between Fiber.yields: the walk
++      # must share the scheduler, but each yield is also the only
++      # point a concurrent #stop can land — the stop-check after
++      # every yield is what keeps arming from racing the fd teardown.
++      YIELD_EVERY = 64
++
++      # Depth-first arming of *path*'s subtree (the path itself is
++      # armed by the caller). `report` emits Created for the children
++      # the walk finds — add_discovered's race-closer. Yields every
++      # YIELD_EVERY directories so the scheduler (and #stop) can
++      # interleave; between yields the stop-check/add pair is atomic
++      # under cooperative scheduling, so no watch is ever added after
++      # a stop has been observed.
++      private def descend(path : String, report : Bool) : Nil
++        budget = YIELD_EVERY
+         begin
+           Dir.each_child(path) do |name|
++            return if @stopped.get
+             child = File.join(path, name)
+             dir = directory?(child)
+             if report
+@@ -95,7 +132,16 @@ module FSWatch
+               flags |= Event::Flag::IsDir if dir
+               emit Event.new(child, flags)
+             end
+-            arm(child, report) if dir
++            next unless dir
++            next if @skip.try &.call(child)
++            arm_one(child)
++            descend(child, report)
++            budget -= 1
++            if budget.zero?
++              budget = YIELD_EVERY
++              Fiber.yield
++              return if @stopped.get
++            end
+           end
+         rescue File::NotFoundError | File::AccessDeniedError
+           # raced away or unreadable — the watch on the parent stands
+diff --git a/src/fswatch/backends/kqueue.cr b/src/fswatch/backends/kqueue.cr
+index 60e00c7..cbfcef6 100644
+--- a/src/fswatch/backends/kqueue.cr
++++ b/src/fswatch/backends/kqueue.cr
+@@ -77,12 +77,14 @@ module FSWatch
+       @kq_io : IO::FileDescriptor
+       @fd_paths = {} of Int32 => String
+       @path_fds = {} of String => Int32
++      @skip : (String -> Bool)?
+       @stopped = Atomic(Bool).new(false)
+       # A zeroed timespec: kevent as a pure drain call.
+       @zero_timeout = LibKEvent::Timespec.new(tv_sec: 0, tv_nsec: 0)
+ 
+       def initialize(@recursive : Bool, interval : Time::Span? = nil,
+-                     &@emit : Event ->)
++                     skip : (String -> Bool)? = nil, &@emit : Event ->)
++        @skip = skip
+         kq = LibKEvent.kqueue
+         raise IO::Error.new("kqueue(2) failed") if kq < 0
+         @kq = kq
+@@ -112,7 +114,9 @@ module FSWatch
+         return unless directory?(path)
+         begin
+           Dir.each_child(path) do |name|
+-            add(File.join(path, name)) if directory?(File.join(path, name))
++            child = File.join(path, name)
++            next if @skip.try &.call(child)
++            add(child) if directory?(child)
+           end
+         rescue File::NotFoundError | File::AccessDeniedError
+         end
+@@ -191,6 +195,7 @@ module FSWatch
+         begin
+           Dir.each_child(path) do |name|
+             child = File.join(path, name)
++            next if @skip.try &.call(child)
+             add(child) unless @path_fds.has_key?(child)
+           end
+         rescue File::NotFoundError | File::AccessDeniedError
+diff --git a/src/fswatch/backends/poll.cr b/src/fswatch/backends/poll.cr
+index 25c65e0..169bc24 100644
+--- a/src/fswatch/backends/poll.cr
++++ b/src/fswatch/backends/poll.cr
+@@ -18,12 +18,14 @@ module FSWatch
+     @interval : Time::Span
+     @roots = [] of String
+     @snapshot = {} of String => Snap
++    @skip : (String -> Bool)?
+     @stopped = Atomic(Bool).new(false)
+     @wake = Channel(Nil).new
+ 
+     def initialize(@recursive : Bool, interval : Time::Span? = nil,
+-                   &@emit : Event ->)
++                   skip : (String -> Bool)? = nil, &@emit : Event ->)
+       @interval = interval || DEFAULT_INTERVAL
++      @skip = skip
+     end
+ 
+     def add(path : String) : Nil
+@@ -74,15 +76,24 @@ module FSWatch
+ 
+     # linfo (not info): a symlink is snapshotted as a leaf and never
+     # descended — a symlink loop would otherwise grow the walk forever.
++    # Skip-filtered children are neither snapshotted nor descended.
+     private def snap(path : String, current : Hash(String, Snap)) : Nil
+       info = File.info?(path, follow_symlinks: false)
+       return unless info
+       dir = info.type.directory?
+       current[path] = Snap.new(info.modification_time, dir)
+       return unless @recursive && dir
++      budget = 256 # share the scheduler on huge trees
+       begin
+         Dir.each_child(path) do |name|
+-          snap(File.join(path, name), current)
++          child = File.join(path, name)
++          next if @skip.try &.call(child)
++          snap(child, current)
++          budget -= 1
++          if budget.zero?
++            budget = 256
++            Fiber.yield
++          end
+         end
+       rescue File::NotFoundError | File::AccessDeniedError
+         # raced away or unreadable — what we have is the snapshot
+diff --git a/src/fswatch/watch.cr b/src/fswatch/watch.cr
+index dd36eeb..461a9a3 100644
+--- a/src/fswatch/watch.cr
++++ b/src/fswatch/watch.cr
+@@ -1,6 +1,12 @@
+ # fswatch.cr — the core: owns the user handler, picks the platform
+ # backend at compile time, feeds it the root path and its observation
+ # fiber, and gates delivery on `#stop`.
++#
++# `skip:` (optional) receives every CHILD directory the recursive
++# arming is about to watch (an absolute path); a true return drops it
++# — no watch, no descent, no events from that subtree. Hosts use it
++# to keep vendored noise (node_modules and friends) off the kernel
++# watch tables; changes there go unreported by design.
+ 
+ module FSWatch
+   class Watch
+@@ -12,13 +18,19 @@ module FSWatch
+     @stopped = Atomic(Bool).new(false)
+ 
+     def initialize(path : String, *, recursive : Bool = true,
+-                   interval : Time::Span? = nil, &handler : Event ->)
++                   interval : Time::Span? = nil,
++                   skip : (String -> Bool)? = nil,
++                   &handler : Event ->)
+       @path = File.expand_path(path)
+       @recursive = recursive
+       @handler = handler
+-      @backend = self.class.select_backend.new(@recursive, interval) do |event|
++      @backend = self.class.select_backend.new(@recursive, interval, skip) do |event|
+         @handler.call(event) unless @stopped.get
+       end
++      # The root itself is armed synchronously (one cheap add — the
++      # watched path is live the moment this returns); the recursive
++      # DESCENT is the backend's business and must never block the
++      # caller for long (see the inotify backend's arming fiber).
+       @backend.add(@path)
+       # The observation fiber — no OS thread, see the shard header.
+       # The scheduler runs it as soon as the constructing fiber
+-- 
+2.51.0
+

@@ -44,11 +44,17 @@ describe Kodkod::IndexQueue do
         q.start(root)
         drain_queue(q)
         # One job for the root's loose files + one per live top dir,
-        # walked lazily by the worker.
+        # walked by the backend (job.files stays empty for lazy scans
+        # — the parent only learns the count).
         folders = q.jobs.map { |j| j.folder == root ? "." : File.basename(j.folder) }.sort
         folders.should eq([".", "src"])
-        files = q.jobs.flat_map(&.files).map { |p| p.lchop(root + "/") }.sort
-        files.should eq(["main.cr", "src/app.cr", "src/deep/low.py"])
+        q.jobs.first.folder.should eq(root)
+        q.jobs.first.files.map { |p| p.lchop(root + "/") }.should eq(["main.cr"])
+        q.jobs[1].total.should eq(2) # src/app.cr + src/deep/low.py
+        index.has_name?("main").should be_true
+        index.has_name?("app").should be_true
+        index.has_name?("low").should be_true
+        index.has_name?("not_indexed").should be_false
       ensure
         FileUtils.rm_rf(root)
       end
@@ -133,6 +139,97 @@ describe Kodkod::IndexQueue do
         drain_queue(q)
         index.has_name?("v3").should be_true
         q.jobs.count { |j| !j.scan? && j.state == :done }.should eq(1)
+      ensure
+        FileUtils.rm_rf(root)
+      end
+    end
+  end
+
+  it "aborts an in-flight job on pause and finishes it after resume" do
+    Dir.tempdir.tap do |tmp|
+      root = File.join(tmp, "kodkod-iq-#{rand(1_000_000)}")
+      FileUtils.mkdir_p(File.join(root, "src"))
+      File.write(File.join(root, "src", "a.cr"), "def held\nend\n")
+      begin
+        bus = Kodkod::EventBus.new
+        index = Kodkod::SymbolIndex.new
+        q = Kodkod::IndexQueue.new(index, bus, ->lang_for(String))
+        q.start(root)
+        q.pause # possibly mid-job — wherever the worker is
+        drain_queue(q)
+        q.paused?.should be_true
+        q.jobs.any? { |j| j.state == :running }.should be_false
+        q.resume
+        drain_queue(q)
+        index.has_name?("held").should be_true
+        q.jobs.all?(&.state.== :done).should be_true
+        q.paused?.should be_false
+      ensure
+        FileUtils.rm_rf(root)
+      end
+    end
+  end
+
+  it "holds fs-event jobs while paused and runs them on resume" do
+    Dir.tempdir.tap do |tmp|
+      root = File.join(tmp, "kodkod-iq-#{rand(1_000_000)}")
+      FileUtils.mkdir_p(root)
+      path = File.join(root, "a.cr")
+      File.write(path, "def before\nend\n")
+      begin
+        bus = Kodkod::EventBus.new
+        index = Kodkod::SymbolIndex.new
+        q = Kodkod::IndexQueue.new(index, bus, ->lang_for(String))
+        q.start(root)
+        drain_queue(q)
+
+        q.pause
+        File.write(path, "def after\nend\n")
+        bus.emit("index.fs", path)
+        q.flush # enqueue despite the pause
+        drain_queue(q)
+        index.has_name?("after").should be_false
+        q.jobs.any?(&.active?).should be_true
+
+        q.resume
+        drain_queue(q)
+        index.has_name?("after").should be_true
+        q.jobs.all?(&.state.== :done).should be_true
+      ensure
+        FileUtils.rm_rf(root)
+      end
+    end
+  end
+
+  it "drops owed work on stop but keeps the queue usable" do
+    Dir.tempdir.tap do |tmp|
+      root = File.join(tmp, "kodkod-iq-#{rand(1_000_000)}")
+      FileUtils.mkdir_p(root)
+      path = File.join(root, "a.cr")
+      File.write(path, "def first\nend\n")
+      begin
+        bus = Kodkod::EventBus.new
+        index = Kodkod::SymbolIndex.new
+        q = Kodkod::IndexQueue.new(index, bus, ->lang_for(String))
+        q.start(root)
+        drain_queue(q)
+
+        File.write(path, "def dropped\nend\n")
+        bus.emit("index.fs", path)
+        q.pause
+        q.flush # the change job sits pending
+        q.stop
+        q.paused?.should be_false
+        q.jobs.all?(&.state.== :done).should be_true
+        drain_queue(q)
+        index.has_name?("dropped").should be_false
+
+        # stop does not brick the queue: later events index normally
+        File.write(path, "def revived\nend\n")
+        bus.emit("index.fs", path)
+        q.flush
+        drain_queue(q)
+        index.has_name?("revived").should be_true
       ensure
         FileUtils.rm_rf(root)
       end

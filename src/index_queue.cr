@@ -1,52 +1,53 @@
-# kodkod — IndexQueue: the project indexer's jobs queue. The DEFAULT
-# queue comes from the workspace root's own directory listing only
-# (one readdir — cheap): one job per top-level folder (plus one for
-# the root's loose files). The per-folder RECURSIVE walks run on the
-# worker fiber, never on the caller's — enumerating a heavy project
-# must not block the UI fiber that called start(). fs-change events
-# (the EventBus's "index.fs") append debounced per-file reindex jobs
-# (a save storm owes one job per file) and lazy walk jobs for new
-# directories.
+# kodkod — IndexQueue: the project indexer's job dispatcher. The
+# queue itself stays CHEAP on purpose — jobs, dedup, debounce,
+# priority, generations — while the walk and the extraction pass run
+# in a sidecar process through an IndexWorker::Backend (see
+# index_worker.cr): the Crystal scheduler is single threaded and the
+# UI must not share a heap with the indexer's allocations.
 #
-# The worker is a spawned fiber, not a thread: the Crystal scheduler
-# is cooperative, so the loop budgets its slices by the CLOCK (SLICE)
-# rather than per file — one oversized file cannot eat a frame — and
-# SymbolExtractor.extract checkpoints every 512 lines through the
-# same budget. Among pending jobs, the one covering the active
-# editor's file (the @prio_for proc) jumps the queue. A `generation`
-# counter invalidates a worker mid-run when the project folder
-# changes or a rescan is ordered — the loop notices and exits without
-# touching the fresh state.
+# The DEFAULT queue comes from the workspace root's own directory
+# listing only (one readdir — cheap): one job per top-level folder
+# (plus one for the root's loose files). fs-change events (the
+# EventBus's "index.fs") append debounced per-file reindex jobs (a
+# save storm owes one job per file) and lazy walk jobs for new
+# directories. Among pending jobs, the one covering the active
+# editor's file (the @prio_for proc) jumps the queue.
 #
-# Events emitted (all on the worker's or the watcher's stack, all
-# synchronous — see EventBus):
+# A `generation` counter invalidates a worker mid-run when the
+# project folder changes or a rescan is ordered: the backend is
+# killed (closing its records channel — a blocked worker wakes with
+# Channel::ClosedError) and a fresh worker generation takes over
+# without touching the fresh state.
+#
+# Events emitted (synchronous on whichever fiber emits — see
+# EventBus; handlers must not yield):
 #   "index.updated"  a file's definitions swapped in (payload: path)
 #   "queue.changed"  a job started, finished or was appended (payload: nil)
 
 require "./event_bus"
 require "./gitignore"
-require "./symbol_extractor"
+require "./index_worker"
 require "./symbol_index"
 
 module Kodkod
   class IndexQueue
     # One indexing unit: every file under one folder (a :scan job,
-    # walked lazily by the worker) or a single file (a :change job
-    # from a debounced fs event).
+    # walked by the backend) or a single file (a :change job from a
+    # debounced fs event).
     class Job
       getter folder : String          # absolute — the job's display unit
-      property files : Array(String)  # absolute paths, filled by the walk
+      property files : Array(String)  # filled for :change/root jobs
       getter reason : Symbol          # :scan | :change
+      property id : Int32 = 0         # wire id, assigned on enqueue
       property state : Symbol = :pending # :pending | :running | :done
       property done : Int32 = 0
-      property? walked : Bool         # false until the worker walked it
+      property total : Int32          # files owed (the walk reports it)
+      property? walked : Bool         # false until the backend walked it
+      property retries : Int32 = 0    # backend crashes before :done
 
       def initialize(@folder : String, @files : Array(String),
                      @reason : Symbol = :scan, @walked : Bool = true)
-      end
-
-      def total : Int32
-        @files.size
+        @total = @files.size
       end
 
       def scan? : Bool
@@ -60,41 +61,45 @@ module Kodkod
       end
     end
 
-    # Walk guards (mirrors QuickOpen's file walk).
-    MAX_FILES = 20_000
-    MAX_DEPTH = 24
-    # Files over this size skip extraction — the regex pass is
-    # synchronous; a vendored 20 MB minified blob is not worth it.
-    MAX_FILE_BYTES = 1_000_000_i64
-    # The worker's cooperative time budget: after this long without a
-    # yield the scheduler gets control back so the UI fiber keeps its
-    # frames, whatever the file sizes in flight.
-    SLICE = 8.milliseconds
     # fs events sit in @dirty this long before becoming :change jobs —
     # a save storm or a checkout collapses into one job per file.
     DEBOUNCE = 300.milliseconds
+    # A job the sidecar died on is retried at most this many times
+    # before it is dropped as :done (empty) — a broken sidecar must
+    # not wedge the queue.
+    MAX_RETRIES = 3
 
     getter jobs : Array(Job) = [] of Job
     getter root : String? = nil
     getter generation : Int32 = 0
+    getter? paused : Bool = false
+
+    @backend_factory : ((String -> String?) -> IndexWorker::Backend)
+    @backend : IndexWorker::Backend? = nil
+    @running = 0
+    @worker_gen = 0
+    @next_id = 0
+    @dirty = [] of String
+    @debounce_armed = false
 
     def initialize(@index : SymbolIndex, @bus : EventBus,
                    @lang_for : String -> String? = ->(path : String) {
                      nil.as(String?)
                    },
-                   @prio_for : -> String? = ->{ nil.as(String?) })
-      @running = false
-      @remaining = MAX_FILES
-      @dirty = [] of String
-      @debounce_armed = false
-      @slice_end = Time.instant
+                   @prio_for : -> String? = ->{ nil.as(String?) },
+                   backend_factory : ((String -> String?) -> IndexWorker::Backend)? = nil)
+      @backend_factory = backend_factory ||
+                         ->(l : String -> String?) {
+                           IndexWorker::Local.new(l).as(IndexWorker::Backend)
+                         }
       @bus.on("index.fs") { |path| on_fs_event(path.to_s) }
       @bus.on("index.overflow") { rebuild }
     end
 
-    # Point the queue at a new project root: drop everything, build
-    # the lazy per-folder jobs from the root's own listing, wake a
-    # worker. The recursive walks happen on the worker, not here.
+    # Point the queue at a new project root: drop everything, kill
+    # the sidecar, build the lazy per-folder jobs from the root's own
+    # listing, wake a worker. A paused queue resumes (a fresh root
+    # makes no sense to keep on hold).
     def start(root : String) : Nil
       @generation += 1
       @root = root
@@ -102,10 +107,12 @@ module Kodkod
       @index.clear
       @dirty.clear
       @debounce_armed = false
-      @remaining = MAX_FILES
-      @jobs.concat(self.class.initial_jobs(root))
+      @paused = false
+      @backend.try(&.kill)
+      @backend = @backend_factory.call(@lang_for)
+      self.class.initial_jobs(root).each { |j| add_job(j) }
       @bus.emit("queue.changed")
-      spawn_worker
+      force_spawn_worker
     end
 
     # Rescan the same root (the Reindex button, an fs-event overflow).
@@ -113,8 +120,41 @@ module Kodkod
       start(@root.not_nil!) if @root
     end
 
+    # --- pause / resume / stop ------------------------------------------
+
+    # Hold the queue: the sidecar is killed (an in-flight job returns
+    # to :pending — the records already applied stay in the index),
+    # pending jobs wait. Resume picks the queue back up.
+    def pause : Nil
+      return if @paused || @root.nil?
+      @paused = true
+      @backend.try(&.kill)
+      @bus.emit("queue.changed")
+    end
+
+    # Resume after pause: a fresh backend (the old one's channel is
+    # closed) and a worker.
+    def resume : Nil
+      return unless @paused
+      @paused = false
+      @backend.try(&.kill)
+      @backend = @backend_factory.call(@lang_for)
+      @bus.emit("queue.changed")
+      spawn_worker
+    end
+
+    # Abort indexing outright: everything still owed (jobs, debounced
+    # dirty paths) is dropped; what the index already holds stays.
+    def stop : Nil
+      @paused = false
+      @dirty.clear
+      @backend.try(&.kill)
+      @jobs.each { |j| j.state = :done if j.active? }
+      @bus.emit("queue.changed")
+    end
+
     def busy? : Bool
-      @running
+      @running > 0
     end
 
     def pending : Array(Job)
@@ -128,7 +168,7 @@ module Kodkod
     # --- the default queue: the root's own listing --------------------
 
     # One lazy :scan job per non-ignored top-level folder (plus the
-    # root's loose files, known immediately) — the worker does the
+    # root's loose files, known immediately) — the backend does the
     # recursive gitignore-aware walking when the job runs.
     def self.initial_jobs(root : String) : Array(Job)
       jobs = [] of Job
@@ -155,49 +195,6 @@ module Kodkod
       jobs
     end
 
-    # Recursive walk under `dir`, honoring the .gitignore stack
-    # (deepest decisive match wins), hidden entries and symlink loops.
-    # Runs on the worker fiber and time-slices like everything else;
-    # the MAX_FILES budget is shared across all of a root's jobs.
-    private def collect(dir : String,
-                        stack : Array({String, Gitignore?}),
-                        acc : Array(String), depth : Int32) : Nil
-      return if depth >= MAX_DEPTH || @remaining <= 0
-      nested = Gitignore.load(File.join(dir, ".gitignore"))
-      here = [{dir, nested}] + stack
-      Dir.each_child(dir) do |name|
-        next if name == ".git" || name.starts_with?('.')
-        path = File.join(dir, name)
-        next if File.symlink?(path)
-        is_dir = File.directory?(path)
-        next if ignored_by?(here, path, is_dir)
-        if is_dir
-          collect(path, here, acc, depth + 1)
-        elsif File.file?(path)
-          acc << path
-          @remaining -= 1
-        end
-        return if @remaining <= 0
-        slice_yield
-      end
-    rescue File::Error | IO::Error
-      # An unreadable subtree is skipped, not fatal.
-    end
-
-    # Deepest .gitignore with an opinion wins; a deeper `!` negation
-    # reads as "not ignored" only if the deeper file says so — the
-    # basic-tier simplification (a negation cannot override a parent
-    # ignore; real git can).
-    private def ignored_by?(stack : Array({String, Gitignore?}),
-                            path : String, dir : Bool) : Bool
-      stack.reverse_each do |base, gi|
-        next unless gi
-        rel = path.lchop(base).lchop('/')
-        return true if gi.ignores?(rel, dir: dir)
-      end
-      false
-    end
-
     # --- fs-event intake ----------------------------------------------
 
     # A watch event landed (file modified/created, or a directory
@@ -211,7 +208,7 @@ module Kodkod
       if File.directory?(path)
         unless @jobs.any? { |j| j.scan? && j.active? &&
                                 j.folder == path }
-          @jobs << Job.new(path, [] of String, walked: false)
+          add_job(Job.new(path, [] of String, walked: false))
           @bus.emit("queue.changed")
           spawn_worker
         end
@@ -248,7 +245,7 @@ module Kodkod
       paths.each do |p|
         next if @jobs.any? { |j| !j.scan? && j.active? &&
                                 j.files.size == 1 && j.files.first == p }
-        @jobs << Job.new(p, [p], :change)
+        add_job(Job.new(p, [p], :change))
       end
       @bus.emit("queue.changed")
       spawn_worker
@@ -256,33 +253,123 @@ module Kodkod
 
     # --- the worker ----------------------------------------------------
 
-    private def spawn_worker : Nil
-      return if @running
-      @running = true
-      gen = @generation
-      spawn(name: "kodkod-index") { run(gen) }
+    private def add_job(job : Job) : Job
+      job.id = (@next_id += 1)
+      @jobs << job
+      job
     end
 
-    private def run(gen : Int32) : Nil
-      reset_slice
-      while @generation == gen
+    # One worker fiber at a time (records are delivered to whichever
+    # fiber receives — two would steal each other's lines). start()
+    # supersedes through force_spawn_worker after killing the backend.
+    # A paused queue holds its jobs until resume.
+    private def spawn_worker : Nil
+      return if @paused
+      force_spawn_worker unless @running > 0
+    end
+
+    private def force_spawn_worker : Nil
+      @running += 1
+      gen = @generation
+      wg = (@worker_gen += 1)
+      spawn(name: "kodkod-index") do
+        begin
+          run(gen, wg)
+        ensure
+          @running -= 1
+        end
+      end
+    end
+
+    private def run(gen : Int32, wg : Int32) : Nil
+      while @generation == gen && @worker_gen == wg && !@paused
         job = next_job || break
+        backend = ensure_backend || break
         job.state = :running
         @bus.emit("queue.changed")
-        walk(job) unless job.walked?
-        job.files.each do |path|
-          break unless @generation == gen
-          index_file(path)
-          job.done += 1
-          @bus.emit("index.updated", path)
-          slice_yield
+        dispatch(backend, job)
+        # Drain the job's records until its :done (the backend is
+        # sequential — one job's stream at a time).
+        finished = false
+        begin
+          loop do
+            rec = backend.records.receive
+            break unless live?(gen, wg, job)
+            next unless rec.job == job.id
+            case rec.kind
+            when :total
+              job.total = rec.count
+              @bus.emit("queue.changed")
+            when :swap
+              @index.replace(rec.path.not_nil!, rec.defs)
+              job.done += 1
+              @bus.emit("index.updated", rec.path)
+            when :done
+              finished = true
+              break
+            end
+          end
+        rescue Channel::ClosedError
+          # the sidecar died or was killed mid-job
         end
-        # A generation bump mid-job leaves it :running; the rescan's
-        # start() cleared @jobs anyway, so only mark done in this gen.
-        job.state = :done if @generation == gen
+        job.walked = true
+        if job.state != :running
+          # stop() already settled this job while we were blocked —
+          # leave its fate alone
+        elsif finished && live?(gen, wg, job)
+          job.state = :done
+        elsif @paused
+          requeue_job(job)
+        else
+          # superseded or crashed: requeue (bounded) or drop
+          job.retries += 1
+          job.state = job.retries >= MAX_RETRIES ? :done : :pending
+          requeue_job(job) if job.state == :pending
+        end
         @bus.emit("queue.changed")
       end
-      @running = false
+      # A pause landing between records (not inside a blocked receive)
+      # leaves the in-flight job :running — put it back. Only the
+      # CURRENT worker may sweep: a superseded one must not touch the
+      # new generation's running jobs. stop() marks jobs :done itself;
+      # a superseding start() cleared them.
+      if @worker_gen == wg
+        @jobs.each { |j| requeue_job(j) if j.state == :running }
+      end
+    end
+
+    # A killed backend (stop, a crashed sidecar) is replaced before it
+    # is driven again — its records channel is closed forever, and a
+    # retry against it would only bounce off Channel::ClosedError.
+    private def ensure_backend : IndexWorker::Backend?
+      if (b = @backend) && !b.records.closed?
+        b
+      elsif @root
+        @backend = @backend_factory.call(@lang_for)
+      end
+    end
+
+    # Back to the queue after an abort (pause, sidecar death): a lazy
+    # scan must re-walk — the backend, not the parent, knows its
+    # files, and dispatch of a walked-empty scan would send nothing.
+    private def requeue_job(job : Job) : Nil
+      job.state = :pending
+      job.done = 0
+      job.walked = false if job.scan?
+    end
+
+    private def live?(gen : Int32, wg : Int32, job : Job) : Bool
+      @generation == gen && @worker_gen == wg && job.state == :running
+    end
+
+    # Hand the job to the backend (a lazy scan is walked there; a
+    # walked scan or a change job carries its files' paths).
+    private def dispatch(backend : IndexWorker::Backend, job : Job) : Nil
+      if job.scan? && !job.walked?
+        backend.folder(job.id, job.folder, @root.not_nil!)
+      elsif (path = job.files.first?)
+        backend.file(job.id, path)
+      end
     end
 
     # The next job to run: a pending job covering the active editor's
@@ -297,49 +384,6 @@ module Kodkod
         return hit if hit
       end
       @jobs.find { |j| j.state == :pending }
-    end
-
-    # Fill a lazy scan job's file list: the recursive walk, on the
-    # worker fiber, time-sliced like everything else.
-    private def walk(job : Job) : Nil
-      root = @root.not_nil!
-      files = [] of String
-      stack = [] of {String, Gitignore?}
-      stack << {job.folder, Gitignore.load(File.join(root, ".gitignore"))}
-      collect(job.folder, stack, files, 0)
-      job.files = files
-      job.walked = true
-      @bus.emit("queue.changed") # the Indexing page's totals wake up
-    end
-
-    def index_file(path : String) : Nil
-      lang = @lang_for.call(path)
-      return unless SymbolExtractor.indexable?(lang)
-      info = File.info?(path) || return
-      return if info.size > MAX_FILE_BYTES
-      text = begin
-        File.read(path)
-      rescue IO::Error | File::Error
-        return
-      end
-      defs = SymbolExtractor.extract(text, lang) { slice_yield }.map do |h|
-        SymbolIndex::Def.new(h.name, h.kind, path, h.line, h.col)
-      end
-      @index.replace(path, defs)
-    end
-
-    # --- cooperative time budget ---------------------------------------
-
-    private def reset_slice : Nil
-      @slice_end = Time.instant + SLICE
-    end
-
-    # Yield to the scheduler once this slice's budget is spent — the
-    # UI fiber gets its frame, then a fresh budget starts.
-    private def slice_yield : Nil
-      return if Time.instant < @slice_end
-      Fiber.yield
-      @slice_end = Time.instant + SLICE
     end
   end
 end

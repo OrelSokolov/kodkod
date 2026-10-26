@@ -14,7 +14,7 @@ shards:
 
   fswatch:
     git: https://github.com/orelsokolov/fswatch.cr.git
-    version: 0.1.0+git.commit.2eff6393f2d67615c970b57b8c1a1e4604b7d6c7
+    version: 0.1.0+git.commit.3e0c915e4d2c59a835872f4bbb3b8327cdc89713
 
   highlight_cr:
     git: https://github.com/orelsokolov/highlight.cr.git

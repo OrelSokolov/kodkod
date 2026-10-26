@@ -44,6 +44,16 @@ describe "language detection" do
     app.lang_for("makefile").should eq("makefile")
     app.lang_for("/proj/.gitignore").should eq("gitignore")
     app.lang_for("sub/dir/.gitignore").should eq("gitignore")
+    app.lang_for("/app/Dockerfile").should eq("dockerfile")
+    app.lang_for("Dockerfile").should eq("dockerfile")
+    app.lang_for("Containerfile").should eq("dockerfile")
+  end
+
+  it "treats a Dockerfile stage suffix as part of the name" do
+    app = LangDetectTestApp.new([] of String)
+    app.lang_for("Dockerfile.dev").should eq("dockerfile")
+    app.lang_for("docker/Dockerfile.prod").should eq("dockerfile")
+    app.lang_for("Containerfile.base").should eq("dockerfile")
   end
 
   it "leaves unknown files plain" do

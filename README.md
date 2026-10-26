@@ -5,7 +5,7 @@
 A code editor (VSCode/Zed-like) built on
 [egui-cr](../egui.cr): a rope buffer for huge files, syntax
 highlighting via the [highlight.cr](../myshards/highlight.cr) shard
-(a 1:1 port of the highlight.js 11 engine, 37 common languages), a
+(a 1:1 port of the highlight.js 11 engine, 38 common languages), a
 lazy-loading file tree, an image viewer tab (PNG/SVG), and a basic
 VIM modal layer.
 
@@ -107,13 +107,13 @@ src/
   syntax/
     syntax.cr        facade: flat (scope, text) tokens over highlight.cr
     palette.cr       scope → color
-    grammars/        crystal (highlight.js has none); the other 37
+    grammars/        crystal (highlight.js has none); the other 38
                      languages come from the shard
-spec/                122 examples, headless (no GPU)
+spec/                260 examples, headless (no GPU)
 ```
 
 Syntax highlighting is delegated to the highlight.cr shard (a path
-dependency, `../myshards/highlight.cr`): 37 common languages out of
+dependency, `../myshards/highlight.cr`): 38 common languages out of
 the box, plus kodkod's own Crystal grammar registered into the
 shard's HLJS instance at require time. Highlighting re-runs per edit
 and is disabled beyond 512 KB (`HIGHLIGHT_MAX_CHARS` in

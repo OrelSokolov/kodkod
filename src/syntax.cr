@@ -1,5 +1,5 @@
 # kodkod — Syntax facade over the highlight.cr shard (a 1:1 port of
-# the highlight.js 11.12.0 engine): 37 common languages come from the
+# the highlight.js 11.12.0 engine): 38 common languages come from the
 # shard's registry; the Crystal grammar lives here and registers into
 # the shard's default HLJS instance at require time. The palette
 # (scope → egui color) stays kodkod's own.
