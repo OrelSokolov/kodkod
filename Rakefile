@@ -26,6 +26,13 @@ def link_flags
     ft_libs = %x{pkg-config --libs-only-L freetype2 2>/dev/null}.strip
     ft_libs = "-L/opt/homebrew/lib" if ft_libs.empty?
     flag = "#{flag} #{ft_libs} -framework Cocoa -framework OpenGL -framework QuartzCore"
+  elsif !WINDOWS
+    # Crystal emits the @[Link] libs (-lGL -lX11 …) BEFORE -legui_cr_sokol,
+    # and GNU ld is order-sensitive — the sokol shim's GL/X11 references
+    # go unresolved (mold/lld tolerate it, CI's plain ld does not). Pass
+    # the archive explicitly: it lands ahead of the whole -l group, and
+    # the later -legui_cr_sokol rescans it to nothing.
+    flag = "#{flag} #{File.join(EGUI_DIR, NATIVE_LIB)}"
   end
   flag
 end
