@@ -317,6 +317,7 @@ module Kodkod
       seen_id = id.child(SEEN_SALT)
       scroll_id = id.child(SCROLL_SALT)
       vel_id = scroll_id.child(3)
+      zoom_acc_id = scroll_id.child(4) # Ctrl+wheel zoom accumulator
       # State cells with no #interact call of their own must be marked
       # used or end-frame pruning drops them: the sticky column, the
       # metrics the class API (scroll_to_line) reads, and the running
@@ -325,6 +326,7 @@ module Kodkod
       memory.use_id(col_id)
       memory.use_id(seen_id)
       memory.use_id(vel_id)
+      memory.use_id(zoom_acc_id)
       memory.use_id(id.child(LINE_H_SALT))
       memory.use_id(id.child(VIEW_H_SALT))
       memory.use_id(id.child(WMAX_SALT))
@@ -388,7 +390,26 @@ module Kodkod
         memory.data.get_f64(vel_id, 0.0),
         memory.scroll_history(scroll_id))
       h_off = memory.data.get_vec2(scroll_id, Egui::Vec2.zero).x
-      if memory.active_scroll_area? == scroll_id && !input.scroll.y.zero?
+      # Ctrl+wheel zooms the font, browser-style: wheel-up (scroll.y < 0
+      # after the backend's negation) zooms IN — the same shared cell
+      # and whole-point steps as the Ctrl+Minus / Ctrl+Equal keys below.
+      # Sokol normalizes one wheel notch to ~1.0, but a touchpad emits a
+      # stream of small deltas, so they accumulate in a cell and only a
+      # crossing of ±1.0 steps one whole point.
+      if memory.active_scroll_area? == scroll_id && !input.scroll.y.zero? &&
+         input.modifiers.ctrl
+        zoom_acc = memory.data.get_f64(zoom_acc_id, 0.0) + input.scroll.y
+        while zoom_acc <= -1.0
+          CodeEditor.zoom(ui.ctx, 1)
+          zoom_acc += 1.0
+        end
+        while zoom_acc >= 1.0
+          CodeEditor.zoom(ui.ctx, -1)
+          zoom_acc -= 1.0
+        end
+        memory.data.set_f64(zoom_acc_id, zoom_acc)
+        kin.takeover
+      elsif memory.active_scroll_area? == scroll_id && !input.scroll.y.zero?
         if input.modifiers.shift
           # scroll.y < 0 is wheel-up; +scroll.y → view-right, so
           # wheel-up must DECREASE h_off (browser/GTK/ScrollArea

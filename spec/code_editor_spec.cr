@@ -387,6 +387,44 @@ describe "CodeEditor font zoom" do
       events: [Egui::Event.key_pressed(Egui::KeyCode::Minus, ctrl)])
     ctx.memory.data.get_f64(cell).should eq(0.0)
   end
+
+  it "Ctrl+wheel zooms like the keys: whole notches, touchpad accumulates" do
+    ctx = Egui::Context.new
+    b = Kodkod::EditorBuffer.new("abc")
+    cell = Kodkod::CodeEditor.font_cell
+    2.times { |i| editor_frame(ctx, b, time: 0.016 * (i + 1)) }
+    ctrl = Egui::Modifiers.new(ctrl: true)
+    pos = Egui::Pos2.new(400.0, 300.0)
+    editor_frame(ctx, b,
+      events: [Egui::Event.pointer_moved(pos)] of Egui::Event, time: 0.048)
+    editor_frame(ctx, b,
+      events: [Egui::Event.key_pressed(Egui::KeyCode::LeftControl, ctrl)] of Egui::Event,
+      time: 0.064)
+    # Wheel-up (scroll.y < 0) zooms IN one whole point per notch.
+    editor_frame(ctx, b,
+      events: [Egui::Event.scroll(Egui::Vec2.new(0.0, -1.0))] of Egui::Event,
+      time: 0.080)
+    ctx.memory.data.get_f64(cell).should eq(17.0)
+    # Wheel-down two notches zooms OUT two points.
+    editor_frame(ctx, b,
+      events: [Egui::Event.scroll(Egui::Vec2.new(0.0, 2.0))] of Egui::Event,
+      time: 0.096)
+    ctx.memory.data.get_f64(cell).should eq(15.0)
+    # Touchpad dribble: small deltas accumulate to one whole step
+    # (0.125 is exact in binary — 0.1 would drift below the threshold).
+    7.times do |i|
+      editor_frame(ctx, b,
+        events: [Egui::Event.scroll(Egui::Vec2.new(0.0, -0.125))] of Egui::Event,
+        time: 0.112 + 0.016 * i)
+    end
+    ctx.memory.data.get_f64(cell).should eq(15.0) # 0.875 accumulated: no step yet
+    1.times do |i|
+      editor_frame(ctx, b,
+        events: [Egui::Event.scroll(Egui::Vec2.new(0.0, -0.125))] of Egui::Event,
+        time: 0.112 + 0.016 * (7 + i))
+    end
+    ctx.memory.data.get_f64(cell).should eq(16.0)
+  end
 end
 
 describe "CodeEditor font zoom (VIM normal: widget keyboard off)" do
