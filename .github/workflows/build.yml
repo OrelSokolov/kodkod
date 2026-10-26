@@ -191,7 +191,10 @@ jobs:
           shards install
 
           crosspack build macos --version "$APP_VERSION"
-          crosspack pack macos
+          # The CLI's pack defaults to --arch amd64, which looks for the
+          # build stamp under builds/macos/x86_64 — the arm64 build put it
+          # in builds/macos/aarch64.
+          crosspack pack macos --arch arm64
 
       # DMG layout mirrors hvoice: the .app next to an /Applications
       # symlink for drag-and-drop install. ditto keeps the bundle's

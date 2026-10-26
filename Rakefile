@@ -68,10 +68,12 @@ task :icons do
   # monochrome, baked in two tints — the caption slot follows the
   # theme (near-white art on the dark chrome and vice versa, see
   # KodkodApp#update); -colorize recolors the RGB channels while the
-  # antialiased alpha edges stay as baked.
+  # antialiased alpha edges stay as baked. Double quotes: single
+  # quotes are not shell syntax on cmd.exe and magick would read
+  # '#202020' as a filename.
   { "dark" => "#202020", "light" => "#E8E8E8" }.each do |tint, hex|
     sh "#{magick} #{SVG_RENDER.join(' ')} -resize 64x64 -extent 64x64 " \
-       "-fill '#{hex}' -channel RGB -colorize 100 RGBA:assets/icon_#{tint}.rgba"
+       "-fill \"#{hex}\" -channel RGB -colorize 100 RGBA:assets/icon_#{tint}.rgba"
   end
 
   # The packaging icons (crosspack picks the .ico up as the MSI

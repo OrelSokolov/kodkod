@@ -15,6 +15,7 @@ dependencies:
     commit: 5d393d0c7c64ac33d67e8b05d8b209a455008256
   highlight_cr:
     github: OrelSokolov/highlight.cr
+    version: 0.1.2
   fswatch:
     github: OrelSokolov/fswatch.cr
     commit: b77d1386aef561e5604ee7869920684464e21b57

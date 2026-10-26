@@ -18,7 +18,7 @@ shards:
 
   highlight_cr:
     git: https://github.com/orelsokolov/highlight.cr.git
-    version: 0.1.0+git.commit.83829b493c40482acc65ff8fa77c22bc7a72cbc1
+    version: 0.1.2
 
   nanosvg:
     git: https://github.com/orelsokolov/nanosvg.cr.git
