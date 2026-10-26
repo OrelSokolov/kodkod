@@ -73,7 +73,10 @@ jobs:
           shards install
           crystal spec
 
-          crosspack build ubuntu-24.04 --version "$APP_VERSION"
+          # --all (not `build ubuntu-24.04`): the entry distributes to
+          # several targets and `crosspack build <target>` stamps ONLY
+          # that one — pack ubuntu-25.10 would find no build stamp.
+          crosspack build --all --version "$APP_VERSION"
           crosspack pack ubuntu-24.04
           crosspack pack ubuntu-25.10
 
