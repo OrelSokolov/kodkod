@@ -61,9 +61,13 @@ jobs:
         # the release binary into build/bin; pack turns it into the deb.
         env:
           APP_VERSION: ${{ needs.version.outputs.app_version }}
+        # The runner's system Ruby refuses gem installs into /var/lib/gems
+        # (Gem::FilePermissionError) — install into a user GEM_HOME and
+        # put its bin/ first on PATH.
         run: |
           set -euxo pipefail
-          gem install crosspack -v "$CROSSPACK_VERSION" --no-document
+          GEM_HOME="$RUNNER_TEMP/gems" gem install crosspack -v "$CROSSPACK_VERSION" --no-document
+          export PATH="$RUNNER_TEMP/gems/bin:$PATH"
 
           crosspack deps ubuntu-24.04
           shards install
@@ -125,6 +129,19 @@ jobs:
           Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.dotnet\tools"
           gem install crosspack -v "$env:CROSSPACK_VERSION" --no-document
 
+      # Locate the MSVC installation in pwsh: resolving vswhere inside a
+      # cmd `for /f` breaks — the ")" in %ProgramFiles(x86)% terminates
+      # the for-set ("\Microsoft was unexpected at this time").
+      - name: Locate MSVC (vswhere)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vspath = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vspath) { throw "vswhere found no MSVC installation" }
+          "VSPATH=$vspath" >> $env:GITHUB_ENV
+
       - name: Build & pack MSI (crosspack + WiX)
         # Everything MSVC (cl.exe for the sokol shim, link.exe for the
         # final binary) must run inside the vcvars64 environment; the
@@ -133,7 +150,6 @@ jobs:
         env:
           APP_VERSION: ${{ needs.version.outputs.app_version }}
         run: |
-          for /f "usebackq delims=" %%i in (`""%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath"`) do set "VSPATH=%%i"
           call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" x64
 
           shards install
