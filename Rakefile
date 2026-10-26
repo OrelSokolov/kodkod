@@ -33,10 +33,15 @@ end
 # Real ImageMagick detection: IM7 ships `magick`, legacy 6.x only ships
 # `convert` — whose version banner must actually say "ImageMagick" before
 # the command is trusted (a same-named foreign binary proves nothing).
+# The PATH scan is pure Ruby: `command -v` is a POSIX builtin and would
+# be a cmd.exe syntax error on Windows hosts.
 def imagemagick_command
   @imagemagick_command ||= ["magick", "convert"].find do |cmd|
-    system("command -v #{cmd} >/dev/null 2>&1") &&
-      %x{#{cmd} -version 2>&1}.to_s.scrub.match?(/ImageMagick/)
+    exe = Gem.win_platform? ? "#{cmd}.exe" : cmd
+    on_path = ENV["PATH"].split(File::PATH_SEPARATOR).any? do |dir|
+      File.executable?(File.join(dir, exe))
+    end
+    on_path && %x{#{cmd} -version 2>&1}.to_s.scrub.match?(/ImageMagick/)
   end
 end
 

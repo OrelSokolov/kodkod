@@ -40,9 +40,11 @@ build:
         darwin: { verify: rake --version }    # ships with the system ruby
         windows: { verify: rake --version }   # RubyInstaller brings it
     imagemagick:
+      # ubuntu/debian ship IM6 — `magick` is IM7-only, so the probe is
+      # `convert` there (the Rakefile accepts either binary).
       hosts:
-        ubuntu: { verify: magick -version, install: sudo apt-get install -y imagemagick }
-        debian: { verify: magick -version, install: sudo apt-get install -y imagemagick }
+        ubuntu: { verify: convert -version, install: sudo apt-get install -y imagemagick }
+        debian: { verify: convert -version, install: sudo apt-get install -y imagemagick }
         fedora: { verify: magick -version, install: sudo dnf install -y ImageMagick }
         arch: { verify: magick -version, install: sudo pacman -S --needed --noconfirm imagemagick }
         darwin: { verify: magick -version, install: brew install imagemagick }
@@ -138,7 +140,6 @@ package:
     categories: Development;Utility;
 
   icon: build/appicon.png
-  min_macos: '11.0'
 
 deps:
   # Runtime dependencies of the package (axis "what we pack for"):
