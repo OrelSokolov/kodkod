@@ -12,7 +12,7 @@ authors:
 dependencies:
   egui-cr:
     github: OrelSokolov/egui.cr
-    commit: 6bb313ded654186d313972bde232a41309fe48dc
+    commit: 5d393d0c7c64ac33d67e8b05d8b209a455008256
   highlight_cr:
     github: OrelSokolov/highlight.cr
   fswatch:

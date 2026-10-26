@@ -59,15 +59,15 @@ jobs:
         # crosspack deps installs crystal (official installer), rake,
         # imagemagick and the X11/GL headers; `rake artifacts:linux` builds
         # the release binary into build/bin; pack turns it into the deb.
+        # The runner's system Ruby refuses gem installs into /var/lib/gems
+        # (Gem::FilePermissionError) — crosspack goes into a user GEM_HOME.
         env:
           APP_VERSION: ${{ needs.version.outputs.app_version }}
-        # The runner's system Ruby refuses gem installs into /var/lib/gems
-        # (Gem::FilePermissionError) — install into a user GEM_HOME and
-        # put its bin/ first on PATH.
         run: |
           set -euxo pipefail
-          GEM_HOME="$RUNNER_TEMP/gems" gem install crosspack -v "$CROSSPACK_VERSION" --no-document
-          export PATH="$RUNNER_TEMP/gems/bin:$PATH"
+          export GEM_HOME="$RUNNER_TEMP/gems"
+          export PATH="$GEM_HOME/bin:$PATH"
+          gem install crosspack -v "$CROSSPACK_VERSION" --no-document
 
           crosspack deps ubuntu-24.04
           shards install

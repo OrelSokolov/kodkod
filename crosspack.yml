@@ -56,7 +56,7 @@ build:
         fedora: { verify: cc --version, install: sudo dnf install -y gcc gcc-c++ make }
         arch: { verify: cc --version, install: sudo pacman -S --needed --noconfirm base-devel }
         darwin: { verify: cc --version, install: xcode-select --install }
-        windows: { verify: link /? }          # MSVC ships with the Crystal/MSYS2 toolchain
+        windows: { verify: where link }          # MSVC ships with the Crystal/MSYS2 toolchain (link /? exits non-zero, so probe PATH instead)
     gui-headers:
       # X11/GL dev headers + linker symlinks: the sokol shim (GLX/X11)
       # compiles against them and the final link resolves libGL/libX11
@@ -75,7 +75,7 @@ build:
           verify: pacman -Qi libx11
           install: sudo pacman -S --needed --noconfirm libx11 libxcursor libxext libxfixes libxi libxrender mesa
         darwin: { verify: cc --version }       # OpenGL headers ship with the CLT
-        windows: { verify: link /? }           # gl.h ships with the Windows SDK
+        windows: { verify: where link }           # gl.h ships with the Windows SDK
 
   # One entry per build host (native builds — the Rakefile already
   # picks the right native lib and link flags per host).

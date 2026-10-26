@@ -2,11 +2,11 @@ version: 2.0
 shards:
   brotli:
     git: https://github.com/orelsokolov/brotli.cr.git
-    version: 0.2.0
+    version: 0.3.0
 
   egui-cr:
     git: https://github.com/orelsokolov/egui.cr.git
-    version: 0.2.0+git.commit.6bb313ded654186d313972bde232a41309fe48dc
+    version: 0.2.0+git.commit.5d393d0c7c64ac33d67e8b05d8b209a455008256
 
   freetype-cr:
     git: https://github.com/orelsokolov/freetype.cr.git
