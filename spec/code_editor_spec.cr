@@ -210,7 +210,7 @@ describe Kodkod::CodeEditor do
     2.times { |i| editor_frame(ctx, b, rows: 100, time: 0.016 * (i + 1)) }
     # Between frames (the VIM ':' command path): the metrics the widget
     # published last frame must survive end-frame pruning.
-    Kodkod::CodeEditor.scroll_to_line(ctx, "t1", 55)
+    Kodkod::CodeEditor.scroll_to_line(ctx, b, "t1", 55)
     wid = Kodkod::CodeEditor.widget_id("t1")
     line_h = ctx.memory.data.get_f64(wid.child(Kodkod::CodeEditor::LINE_H_SALT), 20.0)
     view_h = ctx.memory.data.get_f64(wid.child(Kodkod::CodeEditor::VIEW_H_SALT), 400.0)

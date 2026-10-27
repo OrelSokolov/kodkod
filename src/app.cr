@@ -41,6 +41,10 @@ class KodkodApp < Egui::App
     property highlight_cursor_line : Bool = true
     property syntax_highlight : Bool = true
     property goto_def : Bool = true
+    # Editor view modes (the View menu / Ctrl+Alt+A, Ctrl+Alt+B):
+    # render-only hiding — the buffer text is never modified.
+    property hide_type_annotations : Bool = false
+    property hide_blocks : Bool = false
     # Off by default as a DIAGNOSTIC: indexing does not start when a
     # folder opens — only from the Indexing page's Reindex button —
     # until the freeze-on-heavy-projects cause is pinned down.
@@ -54,6 +58,8 @@ class KodkodApp < Egui::App
                    @highlight_cursor_line : Bool = true,
                    @syntax_highlight : Bool = true,
                    @goto_def : Bool = true,
+                   @hide_type_annotations : Bool = false,
+                   @hide_blocks : Bool = false,
                    @autoindex : Bool = false,
                    @language : String = "en")
     end
@@ -345,6 +351,8 @@ class KodkodApp < Egui::App
   ACTION_REFRESH         = Egui::HotkeyAction.new("kodkod.refresh")
   ACTION_TOGGLE_VIM      = Egui::HotkeyAction.new("kodkod.toggle_vim")
   ACTION_TOGGLE_EXPLORER = Egui::HotkeyAction.new("kodkod.toggle_explorer")
+  ACTION_HIDE_ANNOTATIONS = Egui::HotkeyAction.new("kodkod.view.hide_annotations")
+  ACTION_HIDE_BLOCKS      = Egui::HotkeyAction.new("kodkod.view.hide_blocks")
 
   DEFAULT_BINDINGS = {
     ACTION_NEW             => "Ctrl+N",
@@ -362,6 +370,8 @@ class KodkodApp < Egui::App
     ACTION_REFRESH         => "F5",
     ACTION_TOGGLE_VIM      => "Ctrl+Alt+V",
     ACTION_TOGGLE_EXPLORER => "Ctrl+Shift+E",
+    ACTION_HIDE_ANNOTATIONS => "Ctrl+Alt+A",
+    ACTION_HIDE_BLOCKS      => "Ctrl+Alt+B",
   }
 
   # The chrome panels (explorer sidebar, status bar) run a notch
@@ -436,6 +446,10 @@ class KodkodApp < Egui::App
               @settings.show_hidden = !@settings.show_hidden
               save_settings
             end
+            menu.menu_item("#{@settings.hide_type_annotations ? "✓ " : ""}#{t("menu.hide_annotations")}",
+              ACTION_HIDE_ANNOTATIONS)
+            menu.menu_item("#{@settings.hide_blocks ? "✓ " : ""}#{t("menu.hide_blocks")}",
+              ACTION_HIDE_BLOCKS)
           end
           bar.menu_button(t("menu.settings")) do |menu|
             menu.menu_item(t("menu.settings_open"), ACTION_SETTINGS)
@@ -531,6 +545,10 @@ class KodkodApp < Egui::App
                 # Off = render plain (no tokenization/measured token
                 # runs) — the long-line/minified-file escape hatch.
                 syntax_highlight: @settings.syntax_highlight,
+                # View modes: render-only hiding (CodeEditor elides
+                # comment.annotation tokens / folds block bodies).
+                hide_annotations: @settings.hide_type_annotations,
+                hide_blocks: @settings.hide_blocks,
                 on_ctrl_click: goto_on ? ->on_goto_click(Int32) : nil,
                 link_lookup: goto_on ? ->link_word?(String) : nil,
                 on_context_menu: ->(menu : Egui::Ui) {
@@ -675,6 +693,16 @@ class KodkodApp < Egui::App
           body.toggle_button(@settings.goto_def,
             t("settings.goto_def")) do |on|
             @settings.goto_def = on
+            save_settings
+          end
+          body.toggle_button(@settings.hide_type_annotations,
+            t("settings.hide_annotations")) do |on|
+            @settings.hide_type_annotations = on
+            save_settings
+          end
+          body.toggle_button(@settings.hide_blocks,
+            t("settings.hide_blocks")) do |on|
+            @settings.hide_blocks = on
             save_settings
           end
         end
@@ -1003,6 +1031,14 @@ class KodkodApp < Egui::App
     end
     toggle_vim if ctx.consume_action(ACTION_TOGGLE_VIM)
     toggle_explorer if ctx.consume_action(ACTION_TOGGLE_EXPLORER)
+    if ctx.consume_action(ACTION_HIDE_ANNOTATIONS)
+      @settings.hide_type_annotations = !@settings.hide_type_annotations
+      save_settings
+    end
+    if ctx.consume_action(ACTION_HIDE_BLOCKS)
+      @settings.hide_blocks = !@settings.hide_blocks
+      save_settings
+    end
     ctx.router.navigate("root/settings") if ctx.consume_action(ACTION_SETTINGS)
   end
 
@@ -1712,7 +1748,7 @@ class KodkodApp < Egui::App
       from = rope.line_start(li) + idx
       Kodkod::CodeEditor.set_selection(ctx, doc.focus_id.not_nil!, from, from + q.size)
       Kodkod::CodeEditor.set_cursor_offset(ctx, buffer, doc.focus_id.not_nil!, from + q.size)
-      Kodkod::CodeEditor.scroll_to_line(ctx, doc.focus_id.not_nil!, li, center: true)
+      Kodkod::CodeEditor.scroll_to_line(ctx, buffer, doc.focus_id.not_nil!, li, center: true)
       @status = t("status.match", line: li + 1)
       return
     end

@@ -35,6 +35,14 @@ module Kodkod
     VEL_SALT     =  0x7E1_u64 # kinetic velocity
     BAR_SALT     = 0xBA2_u64  # vertical scrollbar grab
     HBAR_SALT    = 0xBA3_u64  # horizontal scrollbar grab
+    # Scroll anchor: the doc line of the top visible row, plus the
+    # row count it was recorded at (TOPR). The PIXEL offset stays
+    # authoritative while the structure is unchanged (scrolling,
+    # kinetics, external writes); the anchor re-derives it only when
+    # the structure changed under it (toggle/reveal/edit) — so the
+    # view holds the same doc line instead of landing rows away.
+    TOP_SALT     = 0xA4C_u64
+    TOPR_SALT    = 0xA4D_u64
     LINE_H_SALT  = 0x11E1_u64 # line height metric (for the class API)
     VIEW_H_SALT  = 0x21EF_u64 # viewport height metric
     WMAX_SALT    = 0x3A3A_u64 # running max line width
@@ -57,6 +65,11 @@ module Kodkod
     # the link block in #ui) — the col_x prefix measures would go
     # quadratic on minified files.
     LINK_SCAN_MAX_CHARS = 1_000
+    # The elision marker shown for hidden annotations / folded bodies.
+    # Plain ASCII dots: the midline ellipsis glyph (U+22EF) is not in
+    # the mono faces and falls back to a face that renders it
+    # squeezed — three full stops keep the monospace advance.
+    ELLIPSIS = "..."
 
     def initialize(@buffer : EditorBuffer, @focus_id : String? = nil,
                    @keyboard : Bool = true,
@@ -66,6 +79,11 @@ module Kodkod
                    @cursor_blinks : Bool = true,
                    @cursor_line : Bool = true,
                    @syntax_highlight : Bool = true,
+                   # View modes (render-only hiding, see View menu):
+                   # annotations elide to a dim ⋯, block bodies fold
+                   # behind their header line.
+                   @hide_annotations : Bool = false,
+                   @hide_blocks : Bool = false,
                    @on_context_menu : (Egui::Ui ->)? = nil,
                    # Go-to-definition hooks (see the link block in #ui):
                    # `on_ctrl_click` receives the caret offset under a
@@ -167,7 +185,8 @@ module Kodkod
                            text : String) : Int32
       buffer.apply(from, text, count)
       set_cursor_offset(ctx, buffer, focus_id, from + text.size)
-      scroll_to_line(ctx, focus_id, buffer.rope.line_of(from + text.size))
+      scroll_to_line(ctx, buffer, focus_id,
+        buffer.rope.line_of(from + text.size))
       from + text.size
     end
 
@@ -214,34 +233,62 @@ module Kodkod
       end
     end
 
-    # Scroll so `line` is visible (centered when `center`); uses the
-    # metrics the widget published to memory last frame.
-    def self.scroll_to_line(ctx : Egui::Context, focus_id : String,
-                            line : Int32, center : Bool = false) : Nil
+    # Scroll so `line` is visible (centered when `center`). Maps doc
+    # line → display row through the buffer's own projection — no
+    # approximation, no pending requests; the frame's scroll anchor
+    # (TOP_SALT) is what keeps the view stable when the structure
+    # changes under it.
+    def self.scroll_to_line(ctx : Egui::Context, buffer : EditorBuffer,
+                            focus_id : String, line : Int32,
+                            center : Bool = false) : Nil
       id = widget_id(focus_id)
       scroll_id = id.child(SCROLL_SALT)
+      disp = buffer.display
       line_h = ctx.memory.data.get_f64(id.child(LINE_H_SALT), 20.0)
       view_h = ctx.memory.data.get_f64(id.child(VIEW_H_SALT), 400.0)
-      y = line.to_f64 * line_h
+      li = line.clamp(0, {buffer.rope.line_count - 1, 0}.max)
+      y = disp.row_of_line(li).to_f64 * line_h
       off = ctx.memory.data.get_vec2(scroll_id, Egui::Vec2.zero).y
       off = center ? y - view_h / 2.0 : off
       if !center
         off = y if y < off
         off = y + line_h - view_h if y + line_h > off + view_h
       end
-      max_off = {y + line_h * 2.0 - view_h, 0.0}.max # rough clamp
-      # One-sided: never PULL the view up — an over-scrolled view (the
-      # buffer shrank under it, see the v_off comment in #ui) may only
-      # be reined in by real scrolling, not by a caret jump.
+      max_off = {disp.rows_count.to_f64 * line_h - view_h, 0.0}.max
+      # One-sided: never PULL the view up — an over-scrolled view may
+      # only be reined in by real scrolling, not by a caret jump.
       off = off.clamp(0.0, {max_off, off}.max)
       ctx.memory.data.set_vec2(scroll_id,
         Egui::Vec2.new(ctx.memory.data.get_vec2(scroll_id, Egui::Vec2.zero).x,
           off))
+      ctx.memory.use_id(id.child(TOP_SALT))
+      ctx.memory.use_id(id.child(TOPR_SALT))
+      ctx.memory.data.set_int(id.child(TOP_SALT),
+        disp.line_at_row((off / line_h).floor.to_i
+          .clamp(0, {disp.rows_count - 1, 0}.max)))
+      # Mark the pixels as recorded against the CURRENT structure —
+      # a class-API write must win over a stale anchor.
+      ctx.memory.data.set_int(id.child(TOPR_SALT), disp.rows_count)
       ctx.request_repaint
     end
 
     def self.request_focus(ctx : Egui::Context, focus_id : String) : Nil
       ctx.memory.focus.request(widget_id(focus_id))
+    end
+
+    # The doc line `delta` DISPLAY rows away from `line`, folding-
+    # aware: vertical navigation steps over hidden block bodies
+    # instead of landing on invisible lines (the display row count
+    # differs from the doc line count under the hide_blocks mode).
+    # The buffer carries the mode flag — no widget or memory cell
+    # involved.
+    def self.vertical_line(ctx : Egui::Context, buffer : EditorBuffer,
+                           focus_id : String, line : Int32,
+                           delta : Int32) : Int32
+      disp = buffer.display
+      return (line + delta).clamp(0, {buffer.rope.line_count - 1, 0}.max) unless buffer.hide_blocks
+      disp.line_at_row((disp.row_of_line(line) + delta)
+        .clamp(0, {disp.rows_count - 1, 0}.max))
     end
 
     # Land the caret at LINE (0-based), char column COL. Both clamp
@@ -276,8 +323,13 @@ module Kodkod
       ctx.memory.use_id(id.child(COL_SALT))
       ctx.memory.use_id(id.child(SEEN_SALT))
       ctx.memory.use_id(id.child(SCROLL_SALT))
+      # Reveal: a jump into a folded block unfolds it (RubyMine-style)
+      # — otherwise the caret lands on an invisible line and the jump
+      # looks broken. A no-op when the mode is off (the projection
+      # ignores reveals).
+      buffer.reveal_line(li)
       set_cursor(ctx, buffer, focus_id, li, ci)
-      scroll_to_line(ctx, focus_id, li, center: true)
+      scroll_to_line(ctx, buffer, focus_id, li, center: true)
     end
 
     # The identifier (word) around `offset`, as {start, end} char
@@ -311,17 +363,26 @@ module Kodkod
       visuals = style.visuals
       rope = @buffer.rope
       lines = rope.line_count
+      # View modes: the flags are projection inputs living on the
+      # buffer (per document, like lang); `display` is the single
+      # projection the whole frame consumes — structure now, rows
+      # materialized in the builder below.
+      @buffer.hide_annotations = @hide_annotations
+      @buffer.hide_blocks = @hide_blocks
+      disp = @buffer.display
       id = @focus_id ? CodeEditor.widget_id(@focus_id.not_nil!) : ui.next_widget_id
       anchor_id = id.child(ANCHOR_SALT)
       col_id = id.child(COL_SALT)
       seen_id = id.child(SEEN_SALT)
       scroll_id = id.child(SCROLL_SALT)
+      top_id = id.child(TOP_SALT)
+      topr_id = id.child(TOPR_SALT)
       vel_id = scroll_id.child(3)
       zoom_acc_id = scroll_id.child(4) # Ctrl+wheel zoom accumulator
       # State cells with no #interact call of their own must be marked
       # used or end-frame pruning drops them: the sticky column, the
-      # metrics the class API (scroll_to_line) reads, and the running
-      # max line width would all reset every frame.
+      # metrics the class API (scroll_to_line) reads, the running max
+      # line width and the scroll anchor would all reset every frame.
       memory.use_id(anchor_id)
       memory.use_id(col_id)
       memory.use_id(seen_id)
@@ -331,6 +392,8 @@ module Kodkod
       memory.use_id(id.child(VIEW_H_SALT))
       memory.use_id(id.child(WMAX_SALT))
       memory.use_id(id.child(WMAXV_SALT))
+      memory.use_id(top_id)
+      memory.use_id(topr_id)
 
       line_h = font_size * Egui::Fonts::LINE_H_FACTOR
       char_w = fonts.measure("M", font_size).x
@@ -340,7 +403,7 @@ module Kodkod
       # has room for. A taller rect would make the visible window
       # (and the scrollbar / caret-follow math behind it) believe
       # off-screen rows are on-screen — the editor would not scroll
-      # until the content passed `rows` lines, far below the fold.
+      # until the content passed `rows` lines, far below the disp.
       height = {@rows * line_h, {ui.available_height, line_h}.max}.min
       rect = ui.allocate_at_least(Egui::Vec2.new(width, height))
       response = ui.interact(rect, id,
@@ -368,7 +431,7 @@ module Kodkod
       memory.data.set_f64(id.child(LINE_H_SALT), line_h)
       memory.data.set_f64(id.child(VIEW_H_SALT), view_h)
 
-      content_h = lines.to_f64 * line_h
+      content_h = disp.rows_count.to_f64 * line_h
       max_offset = {content_h - view_h, 0.0}.max
 
       # Running max line width (content width for the horizontal
@@ -385,8 +448,18 @@ module Kodkod
 
       # --- vertical kinetic scroll + horizontal wheel -----------------
       memory.register_scroll_area(scroll_id, rect, ui.layer)
-      kin = Egui::KineticScroller.new(
-        memory.data.get_vec2(scroll_id, Egui::Vec2.zero).y,
+      raw_v = memory.data.get_vec2(scroll_id, Egui::Vec2.zero).y
+      if memory.data.get_int(topr_id, -1) == disp.rows_count
+        anchored_v = raw_v # structure unchanged: pixels are the truth
+      else
+        # The row mapping changed under the stored pixels — re-derive
+        # from the anchored top doc line (the intra-row fraction
+        # survives: rows are uniform height).
+        top_line = memory.data.get_int(top_id, 0)
+        anchored_v = disp.row_of_line(top_line).to_f64 * line_h +
+                     (raw_v - (raw_v / line_h).floor * line_h)
+      end
+      kin = Egui::KineticScroller.new(anchored_v,
         memory.data.get_f64(vel_id, 0.0),
         memory.scroll_history(scroll_id))
       h_off = memory.data.get_vec2(scroll_id, Egui::Vec2.zero).x
@@ -442,10 +515,12 @@ module Kodkod
       h_off = h_off.clamp(0.0, {wmax + char_w * 4.0 - view_w, 0.0}.max)
 
       # --- visible window of lines ------------------------------------
-      lv0 = (v_off / line_h).floor.to_i.clamp(0, {lines - 1, 0}.max)
-      lv1 = ((v_off + view_h) / line_h).ceil.to_i.clamp(0, lines)
-      k1 = {lv1, lines}.min
-      k1 = {k1, {lv0 + 1, lines}.min}.max # degenerate zero-height view
+      lv0 = (v_off / line_h).floor.to_i.clamp(0, {disp.rows_count - 1, 0}.max)
+      lv1 = ((v_off + view_h) / line_h).ceil.to_i.clamp(0, disp.rows_count)
+      k1 = {lv1, disp.rows_count}.min
+      k1 = {k1, {lv0 + 1, disp.rows_count}.min}.max # degenerate zero-height view
+      # Doc lines the visible rows show (rows ≠ lines under folding).
+      vis_lines = (lv0...k1).map { |r| disp.line_at_row(r) }
 
       cursor = memory.data.get_int(id, 0).clamp(0, rope.size)
       cursor_prev = cursor
@@ -471,7 +546,7 @@ module Kodkod
       if (ctrl_cb = @on_ctrl_click) && input.modifiers.ctrl &&
          (response.pressed? || response.clicked?) && (pos = input.pointer_pos)
         at = caret_at(inner, pos, v_off, h_off, fonts, font_size,
-          line_h, rope)
+          line_h, rope, disp)
         response.request_focus
         if linkable_at?(link_spans, at)
           ctrl_cb.call(at)
@@ -494,7 +569,7 @@ module Kodkod
       elsif response.pressed? || response.clicked?
         response.request_focus
         if (pos = input.pointer_pos)
-          at = caret_at(inner, pos, v_off, h_off, fonts, font_size, line_h, rope)
+          at = caret_at(inner, pos, v_off, h_off, fonts, font_size, line_h, rope, disp)
           if response.double_clicked?
             line, _col = rope.line_col_of(at)
             w0, w1 = CodeEditor.word_range(rope.line_text(line), at - rope.line_start(line))
@@ -507,10 +582,10 @@ module Kodkod
         end
       end
       if response.drag_started? && (pos = input.pointer_pos) && anchor == -1
-        anchor = caret_at(inner, pos, v_off, h_off, fonts, font_size, line_h, rope)
+        anchor = caret_at(inner, pos, v_off, h_off, fonts, font_size, line_h, rope, disp)
       end
       if response.dragged? && (pos = input.pointer_pos)
-        cursor = caret_at(inner, pos, v_off, h_off, fonts, font_size, line_h, rope)
+        cursor = caret_at(inner, pos, v_off, h_off, fonts, font_size, line_h, rope, disp)
       end
 
       # --- keyboard (insert mode / standard input) --------------------
@@ -529,11 +604,26 @@ module Kodkod
         # branch in handle_keyboard would never fire without this lock.
         ui.ctx.memory.focus.lock_keyboard
         cursor, anchor, edited = handle_keyboard(ui.ctx, cursor, anchor,
-          view_h, line_h, col_id)
+          view_h, line_h, col_id, disp)
         ui.ctx.request_repaint if @cursor_blinks # caret blink
       end
       cursor = cursor.clamp(0, rope.size)
       anchor = -1 if anchor > rope.size
+
+      # An edit inside this frame bumped the rope version — refetch
+      # the projection so the follow/snap/paint below see the
+      # post-edit structure and tokens (both are version-cached), and
+      # re-anchor the view (the stored top doc line maps through the
+      # NEW structure). GATED on `edited`: running it every keyboard
+      # frame re-anchored from the LAST frame's top and cancelled the
+      # kinetic scroll the touchpad was driving (scroll felt dead).
+      if edited
+        disp = @buffer.display
+        anchor_frac = v_off - (v_off / line_h).floor * line_h
+        v_off = disp.row_of_line(memory.data.get_int(top_id, 0)).to_f64 *
+                line_h + anchor_frac
+      end
+      snap_spans = @hide_annotations ? @buffer.token_spans : nil
 
       # --- follow the caret -------------------------------------------
       # `cursor != cursor_seen` covers between-frame jumps (see the
@@ -542,7 +632,7 @@ module Kodkod
       if edited || cursor != cursor_prev || cursor != cursor_seen
         kin.takeover
         line = rope.line_of(cursor)
-        y = line.to_f64 * line_h
+        y = disp.row_of_line(line).to_f64 * line_h
         # Two-sided, like scroll_to_line: push down when the caret is
         # below the view, pull up when it is above. The pull-up is what
         # keeps Backspace (eating newlines makes the caret climb fast
@@ -560,12 +650,15 @@ module Kodkod
         # idling two phantom rows above it.
         if y + line_h > v_off + view_h - CONTEXT_ROWS * line_h
           v_off = { {y + CONTEXT_ROWS * line_h + line_h - view_h,
-                     rope.line_count.to_f64 * line_h - view_h}.min, 0.0 }.max
+                     disp.rows_count.to_f64 * line_h - view_h}.min, 0.0 }.max
         elsif y < v_off + CONTEXT_ROWS * line_h
           v_off = {y - CONTEXT_ROWS * line_h, 0.0}.max
         end
         col = rope.line_col_of(cursor)[1]
-        cx = col_x(rope.line_text(line), col, fonts, font_size)
+        # Under the hide_annotations mode the caret's x rides the
+        # VISIBLE geometry (past an elided run the full-text prefix
+        # measure overshoots by the hidden width).
+        cx = row_x(rope.line_text(line), disp, line, col, fonts, font_size)
         if cx + char_w > h_off + view_w
           h_off = cx + char_w - view_w
         elsif cx < h_off
@@ -580,6 +673,18 @@ module Kodkod
         h_off = h_off.clamp(0.0, {extent, 0.0}.max)
       end
 
+      # Snap the caret/anchor out of render-hidden regions (elided
+      # annotations, folded bodies) — see snap_offset. Runs every
+      # frame: between-frame class-API jumps (VIM, :123) also need
+      # it. The DIRECTION reference is cursor_seen (the caret as last
+      # RENDERED), not cursor_prev: VIM writes the caret BETWEEN
+      # frames, so cursor == cursor_prev in this frame and a
+      # prev-based direction always read "backward" — the caret
+      # stuck at the LEFT edge of every elided "..." (l could never
+      # step through it, while $ jumped over).
+      cursor = snap_offset(rope, cursor, cursor_seen, snap_spans, disp)
+      anchor = snap_offset(rope, anchor, cursor_seen, snap_spans, disp) if anchor >= 0
+
       memory.data.set_int(id, cursor)
       memory.data.set_int(seen_id, cursor)
       memory.data.set_int(anchor_id, anchor)
@@ -592,12 +697,13 @@ module Kodkod
       # row past the end, and line_text CLAMPS — the deleted last line's
       # row would repaint the new last line's text on it for a frame.
       lines = rope.line_count
-      content_h = lines.to_f64 * line_h
+      content_h = disp.rows_count.to_f64 * line_h
       max_offset = {content_h - view_h, 0.0}.max
-      lv0 = (v_off / line_h).floor.to_i.clamp(0, {lines - 1, 0}.max)
-      lv1 = ((v_off + view_h) / line_h).ceil.to_i.clamp(0, lines)
-      k1 = {lv1, lines}.min
-      k1 = {k1, {lv0 + 1, lines}.min}.max # degenerate zero-height view
+      lv0 = (v_off / line_h).floor.to_i.clamp(0, {disp.rows_count - 1, 0}.max)
+      lv1 = ((v_off + view_h) / line_h).ceil.to_i.clamp(0, disp.rows_count)
+      k1 = {lv1, disp.rows_count}.min
+      k1 = {k1, {lv0 + 1, disp.rows_count}.min}.max # degenerate zero-height view
+      vis_lines = (lv0...k1).map { |r| disp.line_at_row(r) }
 
       # --- build the visible rows (measured runs, no layout pass) ------
       # Row geometry without a Fonts#layout pass: the ascent (baseline
@@ -619,10 +725,19 @@ module Kodkod
       vis_l = h_off - char_w * 2.0
       vis_r = h_off + view_w + char_w * 2.0
       fresh = 0.0 # this frame's max over measured (visible) rows
-      (lv0...k1).each do |li|
+      # View-mode elision: annotation tokens collapse to a dim "..."
+      # run. Every built run lands on the DisplayDoc (materialized
+      # rows) — the SAME list the hit-test and the paint read, so the
+      # two directions cannot disagree, and it survives between
+      # frames on the buffer's cache (the widget dies each frame).
+      elide = @hide_annotations && spans
+      ellipsis_w = fonts.measure(ELLIPSIS, font_size).x
+      ellipsis_color = Syntax::Palette.color("comment", visuals.dark)
+      vis_lines.each_with_index do |li, row|
         s = rope.line_start(li)
         text = rope.line_text(li)
         runs = [] of Egui::Galley::RowRun
+        druns = [] of DisplayDoc::Run
         # Widths are ACCUMULATED run by run (each fragment measured
         # once); the old per-run col_x re-measured the whole prefix,
         # making a long line quadratic — one 27k-char line spent
@@ -648,14 +763,29 @@ module Kodkod
             tok_s = {starts[i], s}.max
             tok_e = {starts[i + 1], line_end}.min
             if tok_e > tok_s
-              frag = text[tok_s - s...tok_e - s]
-              fw = fonts.measure(frag, font_size).x
-              if acc < vis_r && acc + fw >= vis_l
-                color = Syntax::Palette.color(toks[i].scope, visuals.dark)
-                runs << Egui::Galley::RowRun.new(frag,
-                  acc, font_size, color, false)
+              if elide && toks[i].scope == "comment.annotation"
+                # View mode: the annotation collapses to one dim "..."
+                # marker — the buffer text is untouched, the caret
+                # snaps around the hidden range (snap_offset).
+                druns << DisplayDoc::Run.new(ELLIPSIS, acc,
+                  acc + ellipsis_w, tok_s - s, tok_e - s, true)
+                if acc < vis_r && acc + ellipsis_w >= vis_l
+                  runs << Egui::Galley::RowRun.new(ELLIPSIS, acc,
+                    font_size, ellipsis_color, false)
+                end
+                acc += ellipsis_w
+              else
+                frag = text[tok_s - s...tok_e - s]
+                fw = fonts.measure(frag, font_size).x
+                druns << DisplayDoc::Run.new(frag, acc, acc + fw,
+                  tok_s - s, tok_e - s, false)
+                if acc < vis_r && acc + fw >= vis_l
+                  color = Syntax::Palette.color(toks[i].scope, visuals.dark)
+                  runs << Egui::Galley::RowRun.new(frag,
+                    acc, font_size, color, false)
+                end
+                acc += fw
               end
-              acc += fw
             end
             i += 1
           end
@@ -663,9 +793,29 @@ module Kodkod
           w = acc
         else
           runs, w = plain_line_runs(text, fonts, font_size, vis_l, vis_r)
+          druns << DisplayDoc::Run.new(text, 0.0, w, 0, text.size, false) unless text.empty?
         end
-        rows << Egui::Galley::Row.new(runs, w, line_h, li.to_f64 * line_h,
-          row_ascent, li > 0)
+        # A folded block collapses to this ONE row: the header carries
+        # the dim "..." marker in place of body + `end` (the marker
+        # maps to the line end for hit-testing).
+        if @hide_blocks && disp.folded_header?(li)
+          druns << DisplayDoc::Run.new(ELLIPSIS, w, w + ellipsis_w,
+            text.size, text.size, true)
+          if w < vis_r
+            runs << Egui::Galley::RowRun.new(ELLIPSIS, w, font_size,
+              ellipsis_color, false)
+          end
+          w += ellipsis_w
+        end
+        disp.store_row(li, druns, w, font_size)
+        # ABSOLUTE display row (lv0 + window index): the galley is
+        # painted in content coordinates (translated by −v_off), so a
+        # window-local index would shift every row up by lv0*line_h
+        # the moment the view scrolls — text and gutter diverge and
+        # the top of the viewport empties out.
+        abs_row = lv0 + row
+        rows << Egui::Galley::Row.new(runs, w, line_h,
+          abs_row.to_f64 * line_h, row_ascent, abs_row > 0)
         wmax = {wmax, w}.max
         fresh = {fresh, w}.max
       end
@@ -712,7 +862,7 @@ module Kodkod
       # Gated by the cursor_line flag (the app's highlight_cursor_line
       # setting); VIM mode draws it too, over its caret-cell highlight.
       if @cursor_line
-        cl_y = inner.min.y + cursor_line.to_f64 * line_h - v_off
+        cl_y = inner.min.y + disp.row_of_line(cursor_line).to_f64 * line_h - v_off
         if cl_y >= inner.min.y - line_h && cl_y < inner.max.y
           band = visuals.dark ?
             visuals.window_fill.lerp(Egui::Color32.rgb(0, 0, 0), 0.18) :
@@ -724,21 +874,23 @@ module Kodkod
         end
       end
 
-      # Selection, per visible line, painted UNDER the text.
+      # Selection, per visible line, painted UNDER the text. Under the
+      # view modes the x positions ride the VISIBLE geometry (past an
+      # elided fragment the full-text measure overshoots).
       if anchor >= 0 && anchor != cursor
         sel_min = {cursor, anchor}.min
         sel_max = {cursor, anchor}.max
-        (lv0...k1).each do |li|
+        vis_lines.each do |li|
           s = rope.line_start(li)
           len = rope.line_length(li)
           a = {sel_min, s}.max
           b = {sel_max, s + len}.min
           next if b < a
           text = rope.line_text(li)
-          x0 = inner.min.x + col_x(text, a - s, fonts, font_size) - h_off
-          x1 = inner.min.x + col_x(text, b - s, fonts, font_size) - h_off
+          x0 = inner.min.x + row_x(text, disp, li, a - s, fonts, font_size) - h_off
+          x1 = inner.min.x + row_x(text, disp, li, b - s, fonts, font_size) - h_off
           x1 += char_w * 0.5 if sel_max > s + len # continues past \n
-          y = inner.min.y + li.to_f64 * line_h - v_off
+          y = inner.min.y + disp.row_of_line(li).to_f64 * line_h - v_off
           painter.rect(Egui::Rect.from_min_size(
             Egui::Pos2.new(x0, y), Egui::Vec2.new({x1 - x0, 2.0}.max, line_h)),
             0.0, visuals.fade_color(visuals.selection_fill, 0.45))
@@ -765,7 +917,7 @@ module Kodkod
       if (ll = @link_lookup) && input.modifiers.ctrl
         if response.hovered? && (pos = input.pointer_pos)
           at = caret_at(inner, pos, v_off, h_off, fonts, font_size,
-            line_h, rope)
+            line_h, rope, disp)
           line, col = rope.line_col_of(at)
           text = rope.line_text(line)
           w0, w1 = CodeEditor.word_range(text, col.clamp(0, text.size - 1))
@@ -774,7 +926,7 @@ module Kodkod
             ui.ctx.set_cursor_icon(Egui::CursorIcon::Pointer)
           end
         end
-        (lv0...k1).each do |li|
+        vis_lines.each do |li|
           text = rope.line_text(li)
           next if text.size > LINK_SCAN_MAX_CHARS
           s = rope.line_start(li)
@@ -798,14 +950,14 @@ module Kodkod
               if Syntax.linkable_scope?(toks[i].scope) && frag_e > frag_s
                 underline_runs(text, frag_s - s, frag_e - s, ll, li,
                   inner, h_off, v_off, line_h, row_ascent, fonts,
-                  font_size, painter, visuals.hyperlink_color)
+                  font_size, painter, visuals.hyperlink_color, disp)
               end
               i += 1
             end
           else
             underline_runs(text, 0, text.size, ll, li, inner, h_off,
               v_off, line_h, row_ascent, fonts, font_size, painter,
-              visuals.hyperlink_color)
+              visuals.hyperlink_color, disp)
           end
         end
       end
@@ -825,16 +977,17 @@ module Kodkod
          (@cursor_blinks ? (input.time % 1.0) < 0.6 : true)
         line, col = rope.line_col_of(cursor)
         text = rope.line_text(line)
-        x = inner.min.x + col_x(text, col, fonts, font_size) - h_off
-        baseline = inner.min.y + line.to_f64 * line_h - v_off + row_ascent
+        x = inner.min.x + row_x(text, disp, line, col, fonts, font_size) - h_off
+        baseline = inner.min.y + disp.row_of_line(line).to_f64 * line_h -
+                   v_off + row_ascent
         box_top = baseline - asc + 1.0 # em box, inset 1px like a row band
         box_h = {asc - desc - 2.0, 2.0}.max
         if @cursor_style == :bar
           painter.rect(Egui::Rect.from_min_size(Egui::Pos2.new(x, box_top),
             Egui::Vec2.new(2.0, box_h)), 0.0, visuals.text_color)
         else
-          w = col_x(text, col + 1, fonts, font_size) -
-              col_x(text, col, fonts, font_size)
+          w = row_x(text, disp, line, col + 1, fonts, font_size) -
+              row_x(text, disp, line, col, fonts, font_size)
           w = fonts.measure(" ", font_size).x if w <= 0.0 # EOL cell
           painter.rect(Egui::Rect.from_min_size(Egui::Pos2.new(x, box_top),
             Egui::Vec2.new(w, box_h)), 0.0, visuals.text_color)
@@ -854,8 +1007,8 @@ module Kodkod
       # the row center, so a plain row-center y reads a couple pixels
       # higher than the line's glyphs.
       num_color = visuals.fade_color(visuals.text_color, 0.5)
-      (lv0...k1).each do |li|
-        y = rect.top + li.to_f64 * line_h - v_off +
+      vis_lines.each do |li|
+        y = rect.top + disp.row_of_line(li).to_f64 * line_h - v_off +
             row_ascent - (asc + desc) / 2.0
         next if y < rect.top - line_h || y > rect.bottom + line_h
         label = (li + 1).to_s
@@ -948,6 +1101,14 @@ module Kodkod
       end
 
       memory.data.set_vec2(scroll_id, Egui::Vec2.new(h_off, v_off))
+      # The scroll anchor pair: the doc line at the top of the view
+      # and the row count it was recorded at. Next frame the pixels
+      # stay authoritative while the count matches; a mismatch means
+      # the structure changed and the anchor re-derives v_off (see
+      # the anchored_v block above).
+      memory.data.set_int(top_id, disp.line_at_row(
+        (v_off / line_h).floor.to_i.clamp(0, {disp.rows_count - 1, 0}.max)))
+      memory.data.set_int(topr_id, disp.rows_count)
       memory.data.set_f64(vel_id, kin_velocity)
 
       response.mark_changed if edited
@@ -956,10 +1117,15 @@ module Kodkod
 
     # --- keyboard ------------------------------------------------------
 
-    # Returns {cursor, anchor, edited}.
+    # Returns {cursor, anchor, edited}. Vertical movement (Up/Down/
+    # PageUp/PageDown) steps DISPLAY rows through `fold` — under the
+    # hide_blocks mode a Down from a folded header must land on the
+    # next VISIBLE line, not on an invisible body line the snap would
+    # then have to rescue.
     private def handle_keyboard(ctx : Egui::Context, cursor : Int32,
                                 anchor : Int32, view_h : Float64,
-                                line_h : Float64, col_id : Egui::Id)
+                                line_h : Float64, col_id : Egui::Id,
+                                disp : DisplayDoc)
       input = ctx.input
       rope = @buffer.rope
       memory = ctx.memory
@@ -1087,27 +1253,33 @@ module Kodkod
         line = rope.line_of(new_cursor)
         des = memory.data.get_int(col_id, rope.line_col_of(new_cursor)[1])
         new_anchor = new_cursor if input.modifiers.shift && new_anchor == -1
-        new_cursor = line_col_offset(rope, line - 1, des)
+        new_cursor = line_col_offset(rope,
+          disp.line_at_row({disp.row_of_line(line) - 1, 0}.max), des)
         new_anchor = new_cursor unless input.modifiers.shift
       elsif input.consume_key(Egui::KeyCode::Down)
         line = rope.line_of(new_cursor)
         des = memory.data.get_int(col_id, rope.line_col_of(new_cursor)[1])
         new_anchor = new_cursor if input.modifiers.shift && new_anchor == -1
-        new_cursor = line_col_offset(rope, line + 1, des)
+        new_cursor = line_col_offset(rope,
+          disp.line_at_row({disp.row_of_line(line) + 1,
+            disp.rows_count - 1}.min), des)
         new_anchor = new_cursor unless input.modifiers.shift
       elsif input.consume_key(Egui::KeyCode::PageUp)
         line = rope.line_of(new_cursor)
         des = memory.data.get_int(col_id, rope.line_col_of(new_cursor)[1])
         page = {(view_h / line_h - 1.0).floor.to_i, 1}.max
         new_anchor = new_cursor if input.modifiers.shift && new_anchor == -1
-        new_cursor = line_col_offset(rope, line - page, des)
+        new_cursor = line_col_offset(rope,
+          disp.line_at_row({disp.row_of_line(line) - page, 0}.max), des)
         new_anchor = new_cursor unless input.modifiers.shift
       elsif input.consume_key(Egui::KeyCode::PageDown)
         line = rope.line_of(new_cursor)
         des = memory.data.get_int(col_id, rope.line_col_of(new_cursor)[1])
         page = {(view_h / line_h - 1.0).floor.to_i, 1}.max
         new_anchor = new_cursor if input.modifiers.shift && new_anchor == -1
-        new_cursor = line_col_offset(rope, line + page, des)
+        new_cursor = line_col_offset(rope,
+          disp.line_at_row({disp.row_of_line(line) + page,
+            disp.rows_count - 1}.min), des)
         new_anchor = new_cursor unless input.modifiers.shift
       elsif input.consume_key(Egui::KeyCode::Home)
         line = rope.line_of(new_cursor)
@@ -1194,7 +1366,8 @@ module Kodkod
                                row_ascent : Float64,
                                fonts : Egui::Fonts, font_size : Float64,
                                painter : Egui::Painter,
-                               link_color : Egui::Color32) : Nil
+                               link_color : Egui::Color32,
+                               disp : DisplayDoc) : Nil
       col = from
       while col < to
         if CodeEditor.word_char?(text[col])
@@ -1204,11 +1377,11 @@ module Kodkod
           end
           word = text[s...col]
           next unless ll.call(word)
-          x0 = inner.min.x + col_x(text, s, fonts, font_size) - h_off
+          x0 = inner.min.x + row_x(text, disp, li, s, fonts, font_size) - h_off
           x1 = x0 + fonts.measure(word, font_size).x
           next if x1 < inner.min.x || x0 > inner.max.x
-          baseline = inner.min.y + li.to_f64 * line_h - v_off +
-                     row_ascent
+          baseline = inner.min.y + disp.row_of_line(li).to_f64 * line_h -
+                     v_off + row_ascent
           painter.line(Egui::Pos2.new(x0, baseline + 2.0),
             Egui::Pos2.new(x1, baseline + 2.0), 1.0, link_color)
         else
@@ -1240,16 +1413,25 @@ module Kodkod
     end
 
     # Nearest caret char offset at a pointer position (screen coords).
-    # The column is found against MEASURED cell boundaries (binary
-    # search, then snapped to the nearest edge).
+    # Fold-aware: y maps to a DISPLAY row, then to its doc line. When
+    # the line has a materialized DisplayDoc row (view modes on, or
+    # any rendered line), the column maps through the run list — the
+    # same geometry that was painted; an elided run's "..." snaps the
+    # caret to its near edge. Otherwise the identity path: MEASURED
+    # full-text prefix boundaries (binary search + midpoint snap).
     private def caret_at(inner : Egui::Rect, pos : Egui::Pos2,
                          v_off : Float64, h_off : Float64,
                          fonts : Egui::Fonts, font_size : Float64,
-                         line_h : Float64, rope : Rope) : Int32
+                         line_h : Float64, rope : Rope,
+                         disp : DisplayDoc) : Int32
       y = pos.y - inner.min.y + v_off
       x = pos.x - inner.min.x + h_off
-      line = (y / line_h).floor.to_i.clamp(0, rope.line_count - 1)
+      line = disp.line_at_row(
+        (y / line_h).floor.to_i.clamp(0, {disp.rows_count - 1, 0}.max))
       text = rope.line_text(line)
+      if (mrow = disp.row(line)) && !mrow.runs.empty?
+        return rope.offset_at(line, disp.col_at(mrow, x, text, fonts, font_size))
+      end
       lo = 0
       hi = text.size
       while lo < hi
@@ -1267,6 +1449,59 @@ module Kodkod
         col += 1 if x > (left + right) / 2.0 # past the cell midpoint
       end
       rope.offset_at(line, col)
+    end
+
+    # Content-x at a doc column through the materialized row (the
+    # offset→x direction: caret, selection edges, link underlines) —
+    # the SAME run list caret_at hit-tests, so paint and hit-test
+    # cannot disagree. No materialized row (identity projection /
+    # outside the last window) → the full-text prefix measure.
+    private def row_x(text : String, disp : DisplayDoc, li : Int32,
+                      col : Int32, fonts : Egui::Fonts,
+                      font_size : Float64) : Float64
+      if (mrow = disp.row(li)) && !mrow.runs.empty?
+        disp.x_at(mrow, col, text, fonts, font_size)
+      else
+        col_x(text, col, fonts, font_size)
+      end
+    end
+
+    # Snap a caret offset out of render-hidden regions (view modes):
+    # strictly inside an elided annotation token → its near edge
+    # (direction from `prev`, so a Left/Right walk steps THROUGH the
+    # range instead of sticking at its boundary); on a hidden fold
+    # line (the body or the `end`) → the header line end (moving up)
+    # or the first line after the block (moving down). Offsets outside
+    # hidden regions are unchanged.
+    private def snap_offset(rope : Rope, offset : Int32, prev : Int32,
+                            spans : {Array(Int32), Array(Syntax::Token)}?,
+                            disp : DisplayDoc) : Int32
+      return offset if offset < 0
+      if (sp = spans)
+        starts, toks = sp
+        lo = 0
+        hi = toks.size
+        while lo < hi # token lo spans [starts[lo], starts[lo+1])
+          mid = (lo + hi) // 2
+          if starts[mid + 1] > offset
+            hi = mid
+          else
+            lo = mid + 1
+          end
+        end
+        if lo < toks.size && toks[lo].scope == "comment.annotation" &&
+           offset > starts[lo] && offset < starts[lo + 1]
+          return offset > prev ? starts[lo + 1] : starts[lo]
+        end
+      end
+      if (b = disp.block_near(line = rope.line_of(offset))) &&
+         line > b.header && line <= b.stop
+        return offset > prev ?
+          (b.stop >= rope.line_count - 1 ? rope.size :
+             rope.line_start(b.stop + 1)) :
+          rope.line_start(b.header) + rope.line_length(b.header)
+      end
+      offset
     end
 
     # Word around `col` on a line for double-click selection (and the
@@ -1313,12 +1548,14 @@ class Egui::Ui
                   cursor_blinks : Bool = true,
                   cursor_line : Bool = true,
                   syntax_highlight : Bool = true,
+                  hide_annotations : Bool = false,
+                  hide_blocks : Bool = false,
                   on_context_menu : (Egui::Ui ->)? = nil,
                   on_ctrl_click : (Int32 ->)? = nil,
                   link_lookup : (String -> Bool)? = nil) : Egui::Response
     add(Kodkod::CodeEditor.new(buffer, focus_id, keyboard,
       escape_clears_focus, tab, rows, cursor_style, cursor_blinks,
-      cursor_line, syntax_highlight, on_context_menu, on_ctrl_click,
-      link_lookup))
+      cursor_line, syntax_highlight, hide_annotations, hide_blocks,
+      on_context_menu, on_ctrl_click, link_lookup))
   end
 end

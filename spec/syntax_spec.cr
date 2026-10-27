@@ -133,6 +133,15 @@ describe Kodkod::Syntax do
       end
     end
 
+    it "paints class variables (@@var) as one variable token, like ruby" do
+      code = "@@queue = Channel(Invocation).new(256)\n@@page : ActiveSupport::SharedPage?\n"
+      crystal_toks = Kodkod::Syntax.highlight(code, "crystal").not_nil!
+      ruby_toks = Kodkod::Syntax.highlight("@@queue = 1\n", "ruby").not_nil!
+      token_with(crystal_toks, "@@queue").not_nil!.scope.should eq("variable")
+      token_with(crystal_toks, "@@page").not_nil!.scope.should eq("variable")
+      token_with(ruby_toks, "@@queue").not_nil!.scope.should eq("variable")
+    end
+
     it "classifies json keys, strings, numbers, literals" do
       code = %q({"a": "b", "n": 3, "t": true, "f": null})
       tokens = Kodkod::Syntax.highlight(code, "json").not_nil!

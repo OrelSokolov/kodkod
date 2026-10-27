@@ -180,9 +180,11 @@ module Kodkod
 
         # `@x : String? = nil` — the ivar stays `variable`, the
         # annotation dims (also covers `def initialize(@x : Int32)`).
+        # `@@?` — both ivars and class vars (`@@count`), as in the
+        # shard's Ruby grammar.
         ivar_type_annotation = Highlight::Mode.new.apply(
           relevance: 0,
-          match: [/@[a-zA-Z_]\w*[?!]?/, annotation_re] of (String | Regex),
+          match: [/@@?[a-zA-Z_]\w*[?!]?/, annotation_re] of (String | Regex),
           scope: {"1" => "variable", "2" => "comment.annotation"}
         )
 
@@ -219,7 +221,7 @@ module Kodkod
                              ),
                              Highlight::Mode.new.apply(
                                scope: "variable",
-                               match: /@[a-zA-Z_]\w*[?!]?/
+                               match: /@@?[a-zA-Z_]\w*[?!]?/
                              ),
                              # \b keeps digits inside identifiers (app2,
                              # ctx2) from matching; hex/oct/bin first so

@@ -572,7 +572,7 @@ module Kodkod
       line, col = buffer.rope.line_col_of(at)
       CodeEditor.set_cursor_offset(ctx, buffer, focus_id, at)
       set_desired_col(ctx, focus_id, col)
-      CodeEditor.scroll_to_line(ctx, focus_id, line)
+      CodeEditor.scroll_to_line(ctx, buffer, focus_id, line)
     end
 
     # One step from `cur`: the nearest match strictly after the caret
@@ -622,8 +622,10 @@ module Kodkod
       when 'h' then rope.offset_at(line, {col - count, 0}.max)
       when 'l' then rope.offset_at(line, {col + count, rope.line_length(line)}.min)
       when 'j', 'k'
-        nl = {(ch == 'j' ? line + count : line - count), 0}.max
-        nl = {nl, rope.line_count - 1}.min
+        # Display-row stepping (fold-aware): j over a folded header
+        # lands on the next VISIBLE line, not an invisible body line.
+        nl = CodeEditor.vertical_line(ctx, buffer, focus_id, line,
+          ch == 'j' ? count : -count)
         rope.offset_at(nl, {desired_col(ctx, focus_id, col), rope.line_length(nl)}.min)
       when 'w' then word_motion(rope, off, count, forward: true)
       when 'b' then word_motion(rope, off, count, forward: false)
@@ -645,7 +647,7 @@ module Kodkod
 
       CodeEditor.set_cursor_offset(ctx, buffer, focus_id, target,
         extend_sel: extend_sel)
-      CodeEditor.scroll_to_line(ctx, focus_id, rope.line_of(target))
+      CodeEditor.scroll_to_line(ctx, buffer, focus_id, rope.line_of(target))
     end
 
     private def jump_half_page(ctx : Egui::Context, buffer : EditorBuffer,
@@ -655,7 +657,7 @@ module Kodkod
       view_h = ctx.memory.data.get_f64(id.child(CodeEditor::VIEW_H_SALT), 400.0)
       half = {(view_h / line_h / 2.0).floor.to_i, 1}.max
       line = CodeEditor.cursor(ctx, buffer, focus_id)[0]
-      nl = {line + dir * half, 0}.max
+      nl = CodeEditor.vertical_line(ctx, buffer, focus_id, line, dir * half)
       apply_motion(ctx, buffer, focus_id, 'G', 1, to_line: nl)
     end
 
@@ -757,7 +759,7 @@ module Kodkod
       idx = {idx, 0}.max
       CodeEditor.set_cursor(ctx, buffer, focus_id, line, idx)
       set_desired_col(ctx, focus_id, idx)
-      CodeEditor.scroll_to_line(ctx, focus_id, line)
+      CodeEditor.scroll_to_line(ctx, buffer, focus_id, line)
     end
 
     private def first_non_blank(rope : Rope, line : Int32) : Int32
