@@ -243,3 +243,33 @@ describe "Crystal %-literals" do
     {% end %}
   end
 end
+
+describe "Crystal string interpolation" do
+  it "tokenizes code inside #{...} as code, not string" do
+    # The user-facing symptom this pins down: everything inside #{...}
+    # used to paint in the string color. The token stream itself is
+    # correct (matches the highlight.js Ruby oracle): plain code inside
+    # the interpolation carries the "subst" scope, nested literals keep
+    # their own scopes.
+    toks = Kodkod::Syntax.highlight(
+      "ui.label(\"FPS: \#{\"%.1f\" % ctx.fps} (\#{x * 1000})\")\n",
+      "crystal"
+    ).not_nil!
+    tokens_join(toks).should eq("ui.label(\"FPS: \#{\"%.1f\" % ctx.fps} (\#{x * 1000})\")\n")
+    toks.find { |t| t.text == "\"%.1f\"" }.try(&.scope).should eq("string")
+    toks.find { |t| t.text == "1000" }.try(&.scope).should eq("number")
+    toks.find { |t| t.text.starts_with?("\#{") }.try(&.scope).should eq("subst")
+    # keywords stay keywords inside an interpolation
+    toks = Kodkod::Syntax.highlight("\"v: \#{if true then 1 else 2 end}\"\n", "crystal").not_nil!
+    %w[if then else end].each do |kw|
+      toks.find { |t| t.scope == "keyword" && t.text == kw }.should_not be_nil
+    end
+  end
+
+  it "paints interpolated code in the default text color" do
+    # GitHub-theme behavior: .hljs-subst has no color of its own, so
+    # #{...} code renders like ordinary code, not like the string.
+    Kodkod::Syntax::Palette.color("subst", true).should be_nil
+    Kodkod::Syntax::Palette.color("subst", false).should be_nil
+  end
+end

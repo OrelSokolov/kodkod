@@ -20,7 +20,12 @@ module Kodkod
         "char.escape"        => Egui::Color32.rgb(0x7e, 0xe7, 0x87),
         "escape"             => Egui::Color32.rgb(0x7e, 0xe7, 0x87),
         "regexp"             => Egui::Color32.rgb(0x7e, 0xe7, 0x87),
-        "subst"              => Egui::Color32.rgb(0xa5, 0xd6, 0xff),
+        # No "subst" entry on purpose: code inside string interpolation
+        # (#{...} in Crystal/Ruby, ${...} in JS templates) renders in the
+        # default text color, as in the GitHub themes — mapping it to the
+        # string color made interpolated code visually blend into the
+        # string. Nested matches (strings, keywords, numbers) keep their
+        # own scopes.
         "symbol"             => Egui::Color32.rgb(0x79, 0xc0, 0xff),
         "class"              => Egui::Color32.rgb(0xff, 0xa6, 0x57),
         "title"              => Egui::Color32.rgb(0xff, 0xa6, 0x57),
@@ -62,7 +67,8 @@ module Kodkod
         "char.escape"        => Egui::Color32.rgb(0x11, 0x63, 0x29),
         "escape"             => Egui::Color32.rgb(0x11, 0x63, 0x29),
         "regexp"             => Egui::Color32.rgb(0x11, 0x63, 0x29),
-        "subst"              => Egui::Color32.rgb(0x0a, 0x30, 0x69),
+        # See the DARK table: interpolated code falls back to the default
+        # text color, GitHub-theme style.
         "symbol"             => Egui::Color32.rgb(0x05, 0x50, 0xae),
         "class"              => Egui::Color32.rgb(0x95, 0x38, 0x00),
         "title"              => Egui::Color32.rgb(0x95, 0x38, 0x00),

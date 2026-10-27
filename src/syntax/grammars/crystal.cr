@@ -149,6 +149,53 @@ module Kodkod
           scope: "title.class"
         )
 
+        # Type annotations (`ctx : Egui::Context`, `) : Nil`,
+        # `@stats_text : String?`) are painted as comments: the bright
+        # class/title/params colors make def signatures shout. The
+        # scope is `comment.annotation` — the palette's longest-prefix
+        # fallback keeps the comment color, while the distinct name
+        # lets the editor address annotations (e.g. to hide them)
+        # without touching real comments. Atoms:
+        # `Foo`, `Foo::Bar`, `Array(String)?`; unions with `|`.
+        base_type = "[A-Z]\\w*(?:::\\w+)*"
+        type_atom = "#{base_type}(?:[ \\t]*\\([^)]*\\))?\\??"
+        type_expr = "#{type_atom}(?:[ \\t]*\\|[ \\t]*#{type_atom})*"
+        annotation_re = Regex.new("[ \\t]*:[ \\t]*" + type_expr)
+
+        param_type_annotation = Highlight::Mode.new.apply(
+          relevance: 0,
+          match: annotation_re,
+          scope: "comment.annotation"
+        )
+
+        # `) : Nil` — the `)` keeps its own color, the annotation dims.
+        # Root-level only: inside params its begin at `)` would beat the
+        # zero-width params end `(?=\))` at the same position and the
+        # params mode would never close.
+        return_type_annotation = Highlight::Mode.new.apply(
+          relevance: 0,
+          match: [/\)/, annotation_re] of (String | Regex),
+          scope: {"2" => "comment.annotation"}
+        )
+
+        # `@x : String? = nil` — the ivar stays `variable`, the
+        # annotation dims (also covers `def initialize(@x : Int32)`).
+        ivar_type_annotation = Highlight::Mode.new.apply(
+          relevance: 0,
+          match: [/@[a-zA-Z_]\w*[?!]?/, annotation_re] of (String | Regex),
+          scope: {"1" => "variable", "2" => "comment.annotation"}
+        )
+
+        # `[] of Foo` / `{} of K => V` — the `of <type>` tail dims the
+        # same way as annotations (uniform color; also keeps `::` in
+        # the type from splitting into a bright `Egui` class plus a
+        # `:Event` symbol).
+        of_type_annotation = Highlight::Mode.new.apply(
+          relevance: 0,
+          match: Regex.new("[ \\t]*of[ \\t]*" + type_expr + "(?:[ \\t]*=>[ \\t]*" + type_expr + ")?"),
+          scope: "comment.annotation"
+        )
+
         block_params = Highlight::Mode.new.apply(
           scope: "params",
           begin: /\|(?!=)/,
@@ -159,11 +206,12 @@ module Kodkod
           keywords: keywords
         )
 
-        default_contains = [hljs.comment("#", "$"), dquote, squote, heredoc] of Highlight::Mode +
-                           percent_lits +
-                           [class_definition, include_extend, object_creation,
-                            upper_case_constant, class_reference, method_definition] of Highlight::Mode +
-                           [block_params] of Highlight::Mode +
+        base_contains = [hljs.comment("#", "$"), dquote, squote, heredoc] of Highlight::Mode +
+                        percent_lits +
+                        [ivar_type_annotation, of_type_annotation,
+                         class_definition, include_extend, object_creation,
+                         upper_case_constant, class_reference, method_definition] of Highlight::Mode +
+                        [block_params] of Highlight::Mode +
                            [
                              Highlight::Mode.new.apply(
                                scope: "symbol",
@@ -186,9 +234,12 @@ module Kodkod
                              ),
                            ] of Highlight::Mode
 
-        # Ruby-style: code inside #{...} and |params| is full code.
+        default_contains = [return_type_annotation] of Highlight::Mode + base_contains
+
+        # Ruby-style: code inside #{...} and |params| is full code. Inside
+        # def parens the type annotation wins over class_reference.
         subst.contains = default_contains
-        params.contains = default_contains
+        params.contains = [param_type_annotation] + base_contains
 
         Highlight::Mode.new.apply(
           name: "Crystal",
