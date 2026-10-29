@@ -27,6 +27,45 @@ describe Kodkod::VoicePage do
       known_custom: Kodkod::VoicePage::CUSTOM_ELEMENTS).should be_empty
   end
 
+  it "renders the model expander body in every engine state (no empty-body states)" do
+    # A complete bundle + engine never loaded → engine_status :idle.
+    # The model section used to render NOTHING for :idle, and an empty
+    # expander body measures 0 height — the expander stayed stuck in
+    # its measuring state and never revealed (no status, no download
+    # button reachable).
+    dir = File.join(Dir.tempdir, "kodkod-voice-idle-#{Random.new.hex(6)}")
+    service = Kodkod::Voice::Service.new(dir,
+      ->{ PageTranscriber.new.as(Kodkod::Voice::Transcriber?) })
+    service.models.complete?.should be_false
+    Kodkod::Voice::ModelStore::FILES.each_key do |name|
+      File.write(service.models.path_for(name), "x")
+    end
+    service.models.complete?.should be_true
+    service.engine_status[0].should eq(:idle)
+
+    page = Kodkod::VoicePage.new(service, Kodkod::I18n.new("ru"))
+    screen = Egui::Rect.from_min_size(Egui::Pos2.zero, Egui::Vec2.new(520.0, 700.0))
+    ctx = Egui::Context.new
+    20.times do |i|
+      ctx.begin_frame(Egui::RawInput.new(screen, [] of Egui::Event, 0.016 * (i + 1)))
+      ctx.central_panel do |ui|
+        page.render(ui, "/proj")
+      end
+      ctx.end_frame
+    end
+
+    # The body must render SOMETHING below the header — the loading row
+    # (:idle preloads the engine) or, once the fake engine is up, the
+    # ready line. The worker races the frames, so accept either.
+    texts = ctx.painter.commands.select(Egui::TextCmd).map(&.text)
+    texts.should contain("Модель распознавания (GigaAM)")
+    (texts.includes?("Загружаю модель…") ||
+     texts.includes?("Модель готова.")).should be_true
+  ensure
+    service.try(&.close)
+    FileUtils.rm_rf(dir) if dir
+  end
+
   it "renders the queue cards from the markup" do
     dir = File.join(Dir.tempdir, "kodkod-voice-page-#{Random.new.hex(6)}")
     fake = PageTranscriber.new

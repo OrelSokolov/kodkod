@@ -197,6 +197,7 @@ module Kodkod
     private def render_model(ui : Egui::Ui) : Nil
       fg = ui.style.visuals.text_color
       dim = Egui::Color32.rgba(fg.r, fg.g, fg.b, 160)
+      small = ui.style.font_size * 0.9
       state, error = @service.engine_status
 
       ui.expander(t("voice.model.title"), default_open: true) do |body|
@@ -219,8 +220,21 @@ module Kodkod
           end
         when :no_models
           body.label(t("voice.model.missing"))
+          body.rich(Egui::RichText.new(t("voice.model.dir",
+            dir: @service.models.dir)).size(small).color(dim))
           if body.button(t("voice.model.download")).clicked?
             @service.models.start_download
+          end
+        when :idle
+          # Models are there but the engine hasn't loaded — start it now
+          # (viewing the Voice page IS the demand) and show the loader.
+          # An EMPTY body here would keep the expander's stored height
+          # at 0, i.e. stuck in the measuring state — it would never
+          # reveal at all.
+          @service.preload
+          body.horizontal do |row|
+            row.spinner
+            row.label(t("voice.model.loading"))
           end
         when :loading
           body.horizontal do |row|

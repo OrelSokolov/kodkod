@@ -94,7 +94,10 @@ module Kodkod
         @db = DB.open(data_dir)
         @recdir = File.join(data_dir, "recordings")
         Dir.mkdir_p(@recdir)
-        @models = ModelStore.new(File.join(data_dir, "models"))
+        # KODKOD_VOICE_MODELS points the engine at an existing bundle
+        # (the same override style as dl.cr's KODKOD_VOICE_<soname>).
+        @models = ModelStore.new(ENV["KODKOD_VOICE_MODELS"]? ||
+          File.join(data_dir, "models"))
         @factory = factory || ->() : Transcriber? {
           return nil unless Gigastt.available?
           GigasttTranscriber.new(@models.dir)
