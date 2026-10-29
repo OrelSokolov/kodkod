@@ -6,7 +6,7 @@ shards:
 
   egui-cr:
     git: https://github.com/orelsokolov/egui.cr.git
-    version: 0.2.0+git.commit.5d393d0c7c64ac33d67e8b05d8b209a455008256
+    version: 0.2.0+git.commit.9d0a278003a0ccc72c29daeac82bd567f077f442
 
   freetype-cr:
     git: https://github.com/orelsokolov/freetype.cr.git
@@ -19,6 +19,10 @@ shards:
   highlight_cr:
     git: https://github.com/orelsokolov/highlight.cr.git
     version: 0.1.2
+
+  minaudio:
+    git: git@github.com:OrelSokolov/minaudio.cr.git
+    version: 0.1.2+git.commit.a400a97aba2a1724db92f32c0314613db378eb89
 
   nanosvg:
     git: https://github.com/orelsokolov/nanosvg.cr.git

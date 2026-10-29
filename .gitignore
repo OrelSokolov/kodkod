@@ -6,3 +6,12 @@
 /build/
 /builds/
 /crosspacks/
+
+# voice: built capture lib + copied ffi + generated miniaudio impl
+/ext/*.o
+/ext/*.so
+/ext/*.a
+/ext/*.dll
+/ext/*.lib
+/ext/*.dylib
+/ext/miniaudio_impl.c

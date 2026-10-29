@@ -12,7 +12,7 @@ authors:
 dependencies:
   egui-cr:
     github: OrelSokolov/egui.cr
-    commit: 5d393d0c7c64ac33d67e8b05d8b209a455008256
+    branch: main
   highlight_cr:
     github: OrelSokolov/highlight.cr
     version: 0.1.2

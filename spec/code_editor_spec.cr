@@ -398,7 +398,10 @@ describe "CodeEditor font zoom" do
     editor_frame(ctx, b,
       events: [Egui::Event.pointer_moved(pos)] of Egui::Event, time: 0.048)
     editor_frame(ctx, b,
-      events: [Egui::Event.key_pressed(Egui::KeyCode::LeftControl, ctrl)] of Egui::Event,
+      # egui-cr dropped the LeftControl keycode (modifiers ride on
+      # #modifiers); any unconsumed key carrying the ctrl state sets
+      # input.modifiers for the zoom frames below.
+      events: [Egui::Event.key_pressed(Egui::KeyCode::F1, ctrl)] of Egui::Event,
       time: 0.064)
     # Wheel-up (scroll.y < 0) zooms IN one whole point per notch.
     editor_frame(ctx, b,
@@ -465,7 +468,7 @@ describe "CodeEditor go-to-definition links" do
     look = ->(w : String) { seen << w; w == "about_click" }
     ctrl = Egui::Modifiers.new(ctrl: true)
     ctx.begin_frame(Egui::RawInput.new(KSCREEN,
-      [Egui::Event.key_pressed(Egui::KeyCode::LeftControl, ctrl)], 0.016))
+      [Egui::Event.key_pressed(Egui::KeyCode::F1, ctrl)], 0.016))
     ctx.central_panel do |ui|
       ui.code_editor(b, focus_id: "t1", link_lookup: look)
     end
@@ -568,7 +571,7 @@ describe "CodeEditor Ctrl links are token-aware" do
     look = ->(w : String) { w == "helper" }
     ctrl = Egui::Modifiers.new(ctrl: true)
     ctx.begin_frame(Egui::RawInput.new(KSCREEN,
-      [Egui::Event.key_pressed(Egui::KeyCode::LeftControl, ctrl)], 0.016))
+      [Egui::Event.key_pressed(Egui::KeyCode::F1, ctrl)], 0.016))
     ctx.central_panel do |ui|
       ui.code_editor(b, focus_id: "t1", link_lookup: look)
     end
@@ -603,7 +606,7 @@ describe "CodeEditor ctrl-click jump vs the widget's own persist" do
     end
     ctx.end_frame
     ctx.begin_frame(Egui::RawInput.new(KSCREEN,
-      [Egui::Event.key_pressed(Egui::KeyCode::LeftControl, ctrl),
+      [Egui::Event.key_pressed(Egui::KeyCode::F1, ctrl),
        Egui::Event.pointer_moved(pos),
        Egui::Event.pointer_pressed(pos),
        Egui::Event.pointer_released(pos)] of Egui::Event, 0.016))

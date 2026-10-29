@@ -1,0 +1,32 @@
+<exml>
+  <!-- The Voice page body (the route wrapper belongs to app.cr's
+       router): the structure lives here, the logic in
+       src/voice/page.cr — model_section/record_button/record_error/
+       dim_label/voice_card/scroll are custom elements rendered by the
+       page's renderer. Edit while the app runs — it hot-reloads. -->
+
+  <page id="root/voice" title="{title}">
+    <scroll>
+      <heading text="{title}"/>
+      <model_section/>
+      <separator/>
+      <record_button/>
+      <record_error if="record_error"/>
+      <dim_label text="{record_hint}"/>
+      <separator/>
+
+      <row>
+        <label text="{queue_title}"/>
+        <checkbox bind="all_projects" text="{all_projects_label}"
+                  on_change="all_projects_changed"/>
+        <button if="has_finished" text="{retranscribe_all_label}"
+                on_click="retranscribe_all"/>
+      </row>
+      <dim_label text="{queue_empty}" unless="has_rows"/>
+
+      <repeat for="rec" in="recordings" key="id">
+        <voice_card/>
+      </repeat>
+    </scroll>
+  </page>
+</exml>

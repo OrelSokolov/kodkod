@@ -10,6 +10,74 @@ WINDOWS  = Gem.win_platform?
 DARWIN   = RUBY_PLATFORM.include?("darwin")
 NATIVE_LIB = WINDOWS ? "lib/egui_cr_sokol.lib" : "lib/libegui_cr_sokol.a"
 
+# --- voice input native inputs (ext/) --------------------------------
+#
+# The mic-capture shim (rec_shim.c over the vendored miniaudio, ported
+# from perevodilka) builds into a SHARED library dlopen'd at runtime
+# (like libgigastt_ffi and libsqlite3 in src/voice/): plain
+# `crystal spec`/`crystal build` never needs it at link time, and
+# builds without it stay valid — voice input degrades gracefully.
+EXT_DIR     = File.expand_path("ext", __dir__)
+GIGASTT_DIR = File.expand_path(ENV.fetch("GIGASTT_DIR", "../gigastt"), __dir__)
+REC_OBJ_EXT = WINDOWS ? ".obj" : ".o"
+REC_SHARED  = File.join(EXT_DIR, WINDOWS ? "kodkod_rec.dll" : "libkodkod_rec.so")
+REC_HEADERS = [File.join(EXT_DIR, "miniaudio", "miniaudio.h")]
+
+# Run `script` (cl/lib) inside the MSVC x64 environment (the same
+# helper as egui-cr's Rakefile — the shim must match Crystal's CRT).
+def msvc(script)
+  vswhere = "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+  unless File.exist?(vswhere)
+    raise "vswhere.exe not found — install Visual Studio 2022 (or its Build " \
+          "Tools) with the \"Desktop development with C++\" workload"
+  end
+  vs = %x{"#{vswhere}" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath}.strip
+  raise "MSVC C++ tools not found (vswhere returned nothing)" if vs.empty?
+  vcvars = File.join(vs, "VC", "Auxiliary", "Build", "vcvars64.bat")
+  sh %Q{cmd /c ""#{vcvars}" >nul && #{script}"}
+end
+
+file File.join(EXT_DIR, "miniaudio_impl.c") => REC_HEADERS do
+  File.write(File.join(EXT_DIR, "miniaudio_impl.c"),
+    "#define MINIAUDIO_IMPLEMENTATION\n#include \"miniaudio.h\"\n")
+end
+
+%w[rec_shim miniaudio_impl].each do |src|
+  obj = File.join(EXT_DIR, "#{src}#{REC_OBJ_EXT}")
+  file obj => [File.join(EXT_DIR, "#{src}.c")] + REC_HEADERS do
+    if WINDOWS
+      msvc("cl /nologo /O2 /MD /std:c11 /c ext\\#{src}.c /Iext\\miniaudio " \
+           "/Fo#{obj.tr('/', '\\')}")
+    else
+      sh "cc -O2 -fPIC -I#{File.join(EXT_DIR, "miniaudio")} -c #{File.join(EXT_DIR, "#{src}.c")} -o #{obj}"
+    end
+  end
+end
+
+REC_OBJS = %w[rec_shim miniaudio_impl].map { |s| File.join(EXT_DIR, "#{s}#{REC_OBJ_EXT}") }
+file REC_SHARED => REC_OBJS do
+  if WINDOWS
+    msvc("link /nologo /DLL /OUT:#{REC_SHARED.tr('/', '\\')} #{REC_OBJS.join(' ').tr('/', '\\')}")
+  else
+    # -lm & co: miniaudio needs sin/cos; the statically-linked Crystal
+    # binary does not export libc symbols for a dlopen'd lib to bind
+    # against, so the .so must carry its own DT_NEEDED for them.
+    sh "cc -shared -o #{REC_SHARED} #{REC_OBJS.join(' ')} -lm -lpthread -ldl"
+  end
+end
+
+desc "Build the mic-capture shim shared lib (ext/), and best-effort copy libgigastt_ffi.so into ext/"
+task "build:rec" => [REC_SHARED] do
+  ffi_src = File.join(GIGASTT_DIR, "target", "release",
+                      WINDOWS ? "gigastt_ffi.dll" : "libgigastt_ffi.so")
+  if File.exist?(ffi_src)
+    FileUtils.cp(ffi_src, File.join(EXT_DIR, File.basename(ffi_src)))
+  else
+    puts "▶ libgigastt_ffi not found in #{GIGASTT_DIR} — voice STT will be unavailable (dlopen at runtime)"
+  end
+end
+
+
 desc "Ensure the egui-cr native library exists (runs its build:native once)"
 task "build:native" do
   lib = File.join(EGUI_DIR, NATIVE_LIB)
@@ -130,13 +198,13 @@ def build_app(opt_flags, label)
 end
 
 desc "Build bin/kodkod without --release (fast iteration; OPT=-O3 for optimized)"
-task "build:dev" => ["build:native"] do
+task "build:dev" => ["build:native", "build:rec"] do
   opt = ENV.fetch("OPT", "").strip
   build_app(opt.empty? ? "" : "#{opt} ", opt.empty? ? "dev" : "dev #{opt}")
 end
 
 desc "Build bin/kodkod with --release (shipped binary)"
-task "build:release" => ["build:native"] do
+task "build:release" => ["build:native", "build:rec"] do
   build_app("--release ", "release")
 end
 

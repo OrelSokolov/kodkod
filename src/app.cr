@@ -26,6 +26,9 @@ require "./symbol_extractor"
 require "./index_queue"
 require "./def_popup"
 require "./symbol_browser"
+require "./voice/service"
+require "./voice/page"
+require "./voice/strip_component"
 
 class KodkodApp < Egui::App
   enable_ecss "kodkod"
@@ -240,6 +243,21 @@ class KodkodApp < Egui::App
   @i18n : Kodkod::I18n = Kodkod::I18n.new
   @vim : Kodkod::VimMode = Kodkod::VimMode.new
   @quick_open : Kodkod::QuickOpen = Kodkod::QuickOpen.new
+  # --- voice input ---------------------------------------------------
+  # The recording queue + STT engine (src/voice/). Data lives under the
+  # user data dir (KODKOD_VOICE_DATA overrides — specs/dev runs).
+  @voice : Kodkod::Voice::Service = Kodkod::Voice::Service.new(
+    ENV["KODKOD_VOICE_DATA"]? ||
+    File.join(Egui::SystemPorts::UserDirs.data, "kodkod", "voice"))
+  @voice_page : Kodkod::VoicePage
+  # The voice strip as an exml component: one renderer walks the whole
+  # app's declarative markup (the strip today), the runtime is the
+  # shared store, and @voice_strip_node is the `<voice_strip/>` use
+  # site parsed once.
+  @exml_renderer : Egui::Exml::Renderer = Egui::Exml::Renderer.new
+  @exml_rt : Egui::Exml::Runtime = Egui::Exml::Runtime.new
+  @voice_strip : Kodkod::VoiceStrip
+  @voice_strip_node : Egui::Exml::Node
 
   def initialize(files : Array(String) = [] of String, dir : String? = nil,
                  theme : String? = nil)
@@ -249,6 +267,21 @@ class KodkodApp < Egui::App
     @about = Kodkod::About.new(@i18n)
     @status = t("status.ready")
     @vim.enabled = @settings.vim
+
+    # The Voice page's Insert button drops the transcript into the
+    # active editor's caret (and hops back from the page).
+    @voice_page = Kodkod::VoicePage.new(@voice, @i18n)
+    @voice_page.on_insert = ->(text : String) {
+      insert_into_active(text)
+      nil
+    }
+
+    # The strip component: markup structure + this class's live slots
+    # and the toggle action (see src/voice/strip_component.cr).
+    @voice_strip = Kodkod::VoiceStrip.new(@voice, @i18n,
+      ->toggle_voice_recording)
+    @exml_renderer.component(@voice_strip)
+    @voice_strip_node = Egui::Exml.parse_fragment("<voice_strip/>").first
 
     # The ':' command layer: editor builtins live in the runner; the
     # app registers everything that touches tabs, files, or quitting
@@ -353,6 +386,7 @@ class KodkodApp < Egui::App
   ACTION_TOGGLE_EXPLORER = Egui::HotkeyAction.new("kodkod.toggle_explorer")
   ACTION_HIDE_ANNOTATIONS = Egui::HotkeyAction.new("kodkod.view.hide_annotations")
   ACTION_HIDE_BLOCKS      = Egui::HotkeyAction.new("kodkod.view.hide_blocks")
+  ACTION_VOICE_RECORD     = Egui::HotkeyAction.new("kodkod.voice.record")
 
   DEFAULT_BINDINGS = {
     ACTION_NEW             => "Ctrl+N",
@@ -372,6 +406,7 @@ class KodkodApp < Egui::App
     ACTION_TOGGLE_EXPLORER => "Ctrl+Shift+E",
     ACTION_HIDE_ANNOTATIONS => "Ctrl+Alt+A",
     ACTION_HIDE_BLOCKS      => "Ctrl+Alt+B",
+    ACTION_VOICE_RECORD     => "Ctrl+Space",
   }
 
   # The chrome panels (explorer sidebar, status bar) run a notch
@@ -420,6 +455,11 @@ class KodkodApp < Egui::App
     sync_file_watches
     pump_reload_queue
 
+    # Voice: download progress + finished transcripts (insert at the
+    # cursor of the recording's tab). Runs before the routes for the
+    # same one-frame-latch reason as pump_reload_queue.
+    pump_voice(ctx)
+
     ctx.routes do |r|
       r.page "root/root" do
         ctx.menu_bar do |bar|
@@ -455,6 +495,9 @@ class KodkodApp < Egui::App
             menu.menu_item(t("menu.settings_open"), ACTION_SETTINGS)
             menu.menu_item(t("menu.indexing")) do
               ctx.router.navigate("root/indexing")
+            end
+            menu.menu_item(t("menu.voice")) do
+              ctx.router.navigate("root/voice")
             end
             menu.menu_item("#{@vim.enabled? ? "✓ " : ""}#{t("menu.vim")}",
               ACTION_TOGGLE_VIM)
@@ -619,6 +662,10 @@ class KodkodApp < Egui::App
               elsif (buffer = active.buffer?)
                 line, col = Kodkod::CodeEditor.cursor(ctx, buffer, active.focus_id.not_nil!)
                 mode = @vim.enabled? ? @vim.status_label : t("status.standard")
+                if @voice.recording?
+                  time = "%02d:%02d" % [@voice.elapsed.to_i // 60, @voice.elapsed.to_i % 60]
+                  mode = "#{mode}   " + t("voice.status.recording", time: time)
+                end
                 lang = buffer.lang || "plain"
                 path = buffer.name
                 # A ':'/'/'/'?' line being typed takes over the ruler spot
@@ -646,6 +693,19 @@ class KodkodApp < Egui::App
                 end
                 ui.rich(text)
               end
+            end
+          end
+        end
+
+        # The compact voice strip, between the editor and the status
+        # bar (bottom panels stack UPWARD in declaration order, so this
+        # one is declared after "status"): the record/stop toggle, a
+        # blinking dot while recording, a spinner while transcribing.
+        # Appears only while something voice-related is in flight.
+        if voice_strip_visible?
+          ctx.bottom_panel("voice", resizable: false) do |ui|
+            with_panel_font(ui.ctx) do
+              render_voice_strip(ui)
             end
           end
         end
@@ -828,6 +888,12 @@ class KodkodApp < Egui::App
         ui.label(t("indexing.hint"))
       end
 
+      # The voice-input page: model status/download, the record button,
+      # the per-project message queue (src/voice/page.cr).
+      r.page "root/voice", title: t("voice.title") do |ui|
+        @voice_page.render(ui, @folder)
+      end
+
       if @pending_close
         pending_doc = @pending_close.not_nil!
         r.modal "root/confirm-close",
@@ -1001,6 +1067,70 @@ class KodkodApp < Egui::App
   end
 
   # Translate a UI string in the active locale (see Kodkod::I18n).
+  # --- voice input ----------------------------------------------------
+
+  # One frame's voice bookkeeping: download progress polling, the
+  # repaint pump while anything voice-related is in flight, and the
+  # finished-transcript handoff (insert into the tab that recorded —
+  # at the caret position it has BY THEN; a closed tab just leaves the
+  # row on the Voice page).
+  private def pump_voice(ctx : Egui::Context) : Nil
+    @voice.take_finished.each do |finished|
+      next unless finished.ok
+      fid = @voice.auto_insert_target(finished.id)
+      doc = fid ? @docs.find { |d| d.focus_id == fid } : nil
+      if doc && (buf = doc.buffer?) && (target_fid = doc.focus_id)
+        insert_voice_text(ctx, buf, target_fid, finished.transcript)
+        @status = t("voice.status.inserted", chars: finished.transcript.size)
+      else
+        @status = t("voice.status.done")
+      end
+    end
+    @voice.models.poll_download
+    ctx.request_repaint if @voice.active?
+  end
+
+  # Ctrl+Space: toggle a recording in the ACTIVE editor tab.
+  private def toggle_voice_recording : Nil
+    if @voice.recording?
+      @voice.stop_recording
+    else
+      fid = @docs[selected]?.try(&.focus_id)
+      @voice.start_recording(@folder.to_s, fid)
+    end
+  end
+
+  # --- the compact voice strip (above the status bar) -----------------
+
+  private def voice_strip_visible? : Bool
+    @voice.recording? || @voice.working? || @voice.record_error != nil
+  end
+
+  private def render_voice_strip(ui : Egui::Ui) : Nil
+    # Declarative half: assets/exml/voice_strip.exml through the exml
+    # renderer (the component publishes the service slots per frame).
+    @exml_renderer.render(@voice_strip_node, ui, ui.ctx, @exml_rt)
+  end
+
+  # The Voice page's Insert button: transcript → the active tab's caret
+  # (hop back from the page so the insertion is on screen).
+  private def insert_into_active(text : String) : Nil
+    if (doc = @docs[selected]?) && (buf = doc.buffer?) && (fid = doc.focus_id)
+      insert_voice_text(ctx, buf, fid, text)
+      Kodkod::CodeEditor.request_focus(ctx, fid)
+      ctx.router.back if ctx.router.current.page_id == "root/voice"
+    end
+  end
+
+  # Both insert paths funnel here: wrap to ≤120 chars per line and
+  # guarantee the trailing newline (see Service.wrap_text).
+  private def insert_voice_text(ctx : Egui::Context,
+                                buf : Kodkod::EditorBuffer, fid : String,
+                                text : String) : Nil
+    Kodkod::CodeEditor.insert_text(ctx, buf, fid,
+      Kodkod::Voice::Service.wrap_text(text))
+  end
+
   private def t(key : String, **args) : String
     @i18n.t(key, **args)
   end
@@ -1038,6 +1168,9 @@ class KodkodApp < Egui::App
     if ctx.consume_action(ACTION_HIDE_BLOCKS)
       @settings.hide_blocks = !@settings.hide_blocks
       save_settings
+    end
+    if ctx.consume_action(ACTION_VOICE_RECORD)
+      toggle_voice_recording
     end
     ctx.router.navigate("root/settings") if ctx.consume_action(ACTION_SETTINGS)
   end

@@ -1,0 +1,9 @@
+<row>
+  <blink if="recording"/>
+  <label text="{rec}" if="recording" live="true"/>
+  <spinner if="working"/>
+  <label text="{queue}" if="working"/>
+  <label text="{error}" if="error"/>
+  <button text="{toggle}" on_click="voice_toggle"/>
+  <model_chip text="{model}" state="{model_state}"/>
+</row>

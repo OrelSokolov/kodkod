@@ -135,7 +135,7 @@ module Kodkod
       return @error if @error
       return nil if @svg_source
       @texture = ctx.load_image(@path) if @texture.zero?
-      @intrinsic ||= ctx.textures.image_size(@path)
+      @intrinsic ||= ctx.image_size(@path)
       @error = "Cannot decode image: #{name}" if @texture.zero?
       @error
     end

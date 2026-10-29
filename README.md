@@ -69,6 +69,7 @@ archives; other builds upload the same files as workflow artifacts.
 | Ctrl+Comma | settings (font size, theme, hidden files…) |
 | F5 | refresh explorer |
 | Ctrl+Alt+V | toggle VIM mode |
+| Ctrl+Space | voice input: start/stop recording (the transcript is inserted at the cursor when ready; see Settings → Voice Messages) |
 
 ## VIM mode
 
@@ -104,13 +105,28 @@ src/
   file_viewer.cr     the image tab: PNG (stb_image) / SVG (NanoSVG),
                      wheel zoom, drag pan, double-click refits
   rope.cr            the text buffer (piece-free rope; huge files)
+  voice/             voice input (GigaAM via gigastt-ffi, dlopen):
+                      mic capture → WAV → SQLite queue per project →
+                      transcript inserted at the caret; the Voice page
+                      downloads the model and replays/retries rows
   syntax/
     syntax.cr        facade: flat (scope, text) tokens over highlight.cr
     palette.cr       scope → color
     grammars/        crystal (highlight.js has none); the other 38
                      languages come from the shard
-spec/                260 examples, headless (no GPU)
+spec/                305 examples, headless (no GPU)
 ```
+
+Voice input notes: `rake build:dev` also builds `ext/libkodkod_rec.so`
+(mic capture) and copies `libgigastt_ffi.so` from a `../gigastt`
+checkout (`GIGASTT_DIR` overrides). Both load at runtime via dlopen —
+builds without them stay valid, and the Voice page just reports voice
+input unavailable. The GigaAM model bundle (~310 MB) downloads from
+the page itself. While a recording or a transcription is in flight, a
+compact strip appears between the editor and the status bar: a
+blinking red dot + timer with the stop button while recording, a
+spinner while transcribing, and a record button to start the next
+take.
 
 Syntax highlighting is delegated to the highlight.cr shard (a path
 dependency, `../myshards/highlight.cr`): 38 common languages out of
