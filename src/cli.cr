@@ -10,8 +10,10 @@
 require "option_parser"
 
 module Kodkod
-  # Keep in sync with shard.yml.
-  VERSION = "0.1.1"
+  # Single source of truth: shard.yml, read at compile time (the
+  # About modal aliases this constant, so nothing can drift again).
+  VERSION = {{ read_file(__DIR__ + "/../shard.yml") }}
+        .match(/^version:\s*(\S+)/m).try(&.[1].delete(%q{"'})) || "0.0.0"
 
   struct CLIOptions
     getter theme : String?

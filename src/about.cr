@@ -7,6 +7,7 @@
 # would read as an empty modal).
 
 require "egui-cr/egui"
+require "./cli"
 
 module Kodkod
   class About
@@ -15,8 +16,10 @@ module Kodkod
     ICON = {{ read_file(__DIR__ + "/../assets/kodkod.svg") }}
           .gsub("fill:#000000", "fill:currentColor")
 
-    # Keep in step with shard.yml.
-    VERSION = "0.1.1"
+    # Alias of Kodkod::VERSION (cli.cr), which reads shard.yml at
+    # compile time — the package version and the About line can't
+    # drift apart.
+    VERSION = Kodkod::VERSION
 
     @i18n : Kodkod::I18n
     @svg : Egui::Svg
