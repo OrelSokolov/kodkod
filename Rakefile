@@ -46,8 +46,11 @@ end
   obj = File.join(EXT_DIR, "#{src}#{REC_OBJ_EXT}")
   file obj => [File.join(EXT_DIR, "#{src}.c")] + REC_HEADERS do
     if WINDOWS
-      msvc("cl /nologo /O2 /MD /std:c11 /c ext\\#{src}.c /Iext\\miniaudio " \
-           "/Fo#{obj.tr('/', '\\')}")
+      # /experimental:c11atomics: rec_shim's <stdatomic.h> ring buffer
+      # needs it — plain /std:c11 leaves MSVC's C11 atomics off
+      # (vcruntime_c11_stdatomic.h #errors out).
+      msvc("cl /nologo /O2 /MD /std:c11 /experimental:c11atomics /c " \
+           "ext\\#{src}.c /Iext\\miniaudio /Fo#{obj.tr('/', '\\')}")
     else
       sh "cc -O2 -fPIC -I#{File.join(EXT_DIR, "miniaudio")} -c #{File.join(EXT_DIR, "#{src}.c")} -o #{obj}"
     end

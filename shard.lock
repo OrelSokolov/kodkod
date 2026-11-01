@@ -6,7 +6,7 @@ shards:
 
   egui-cr:
     git: https://github.com/orelsokolov/egui.cr.git
-    version: 0.5.0+git.commit.5b90547ad485b7fba0885bf7b8d5b705aa45fad8
+    version: 0.5.0+git.commit.20b3d90a9b5c6753245ca12e3d56545ff298d215
 
   freetype-cr:
     git: https://github.com/orelsokolov/freetype.cr.git
