@@ -7,12 +7,22 @@
 # holding the running binary ($ORIGIN — portable installs keep the lib
 # next to kodkod), the repo's ext/ (dev builds), then the bare soname
 # through the system loader (LD_LIBRARY_PATH / default paths).
+#
+# Windows has no dlfcn: LoadLibraryA/GetProcAddress carry the same
+# contract (the voice libs are plain cdecl DLLs).
 
-lib LibDl
-  fun dlopen = dlopen(filename : UInt8*, flag : Int32) : Void*
-  fun dlsym = dlsym(handle : Void*, symbol : UInt8*) : Void*
-  fun dlerror = dlerror : UInt8*
-end
+{% if flag?(:windows) %}
+  lib LibDl
+    fun load_library = LoadLibraryA(file_name : UInt8*) : Void*
+    fun get_proc_address = GetProcAddress(h_module : Void*, proc_name : UInt8*) : Void*
+  end
+{% else %}
+  lib LibDl
+    fun dlopen = dlopen(filename : UInt8*, flag : Int32) : Void*
+    fun dlsym = dlsym(handle : Void*, symbol : UInt8*) : Void*
+    fun dlerror = dlerror : UInt8*
+  end
+{% end %}
 
 module Kodkod
   module Voice
@@ -58,21 +68,30 @@ module Kodkod
       end
 
       private def self.raw_open(path : String) : Void*?
-        LibDl.dlerror # clear the sticky error
-        handle = LibDl.dlopen(path.to_unsafe, RTLD_NOW | RTLD_LOCAL)
-        if handle.null?
-          LibDl.dlerror
-          nil
-        else
-          handle
-        end
+        {% if flag?(:windows) %}
+          handle = LibDl.load_library(path.to_unsafe)
+          handle.null? ? nil : handle
+        {% else %}
+          LibDl.dlerror # clear the sticky error
+          handle = LibDl.dlopen(path.to_unsafe, RTLD_NOW | RTLD_LOCAL)
+          if handle.null?
+            LibDl.dlerror
+            nil
+          else
+            handle
+          end
+        {% end %}
       end
 
       # Look up a symbol; nil when absent. The handle stays owned by
       # the caller (never dlclose'd — the libs live for the process
       # lifetime).
       def self.sym(handle : Void*, name : String) : Void*?
-        ptr = LibDl.dlsym(handle, name.to_unsafe)
+        ptr = {% if flag?(:windows) %}
+                LibDl.get_proc_address(handle, name.to_unsafe)
+              {% else %}
+                LibDl.dlsym(handle, name.to_unsafe)
+              {% end %}
         ptr.null? ? nil : ptr
       end
     end

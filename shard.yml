@@ -37,7 +37,9 @@ binaries:
       # (same reasoning as the Rakefile link_flags)
       linux: [-Llib/egui-cr/lib, lib/egui-cr/lib/libegui_cr_sokol.a]
       darwin: [-Llib/egui-cr/lib, -L/opt/homebrew/lib, -framework Cocoa,
-               -framework OpenGL, -framework QuartzCore]
+               -framework OpenGL, -framework QuartzCore,
+               -framework AVFoundation, -framework CoreMedia,
+               -framework CoreVideo]
       windows: [/LIBPATH:lib/egui-cr/lib]
     launchers:
       menu: true       # app menu entry (.desktop / Start Menu / ~/Applications)

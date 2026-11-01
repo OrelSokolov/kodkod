@@ -283,7 +283,7 @@ module Kodkod
               @engine_error = e.message
             end
           end
-          LibUsleep.usleep(150_000)
+          Kodkod::Voice.sleep_us(150_000)
         end
       end
 

@@ -9,8 +9,27 @@
 
 require "./dl"
 
-lib LibUsleep
-  fun usleep(usec : UInt32) : Int32
+lib LibSleep
+  {% if flag?(:windows) %}
+    # POSIX usleep отсутствует в MSVCRT — пауза в миллисекундах.
+    fun ms = Sleep(milliseconds : UInt32)
+  {% else %}
+    fun us = usleep(usec : UInt32) : Int32
+  {% end %}
+end
+
+module Kodkod
+  module Voice
+    # Пауза в микросекундах (POSIX usleep; Sleep(ms) на Windows —
+    # суб-миллисекундная точность там не нужна, минимум 1 мс).
+    def self.sleep_us(usec : UInt32) : Nil
+      {% if flag?(:windows) %}
+        LibSleep.ms({usec // 1000, 1_u32}.max)
+      {% else %}
+        LibSleep.us(usec)
+      {% end %}
+    end
+  end
 end
 
 module Kodkod
@@ -121,7 +140,7 @@ module Kodkod
       private def reader_loop : Nil
         read_fn = @read_fn.not_nil!
         until @mutex.synchronize { @stopping }
-          LibUsleep.usleep(10_000)
+          Kodkod::Voice.sleep_us(10_000)
           drain_ring(read_fn)
         end
         drain_ring(read_fn) # final drain of the ring's remains

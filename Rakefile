@@ -96,7 +96,12 @@ def link_flags
   if DARWIN
     ft_libs = %x{pkg-config --libs-only-L freetype2 2>/dev/null}.strip
     ft_libs = "-L/opt/homebrew/lib" if ft_libs.empty?
-    flag = "#{flag} #{ft_libs} -framework Cocoa -framework OpenGL -framework QuartzCore"
+    # AVFoundation/CoreMedia/CoreVideo: the sokol shim's camera + mic
+    # sections reference them — without the frameworks the final link
+    # dies on _OBJC_CLASS_$_AVCapture* symbols.
+    flag = "#{flag} #{ft_libs} -framework Cocoa -framework OpenGL " \
+           "-framework QuartzCore -framework AVFoundation " \
+           "-framework CoreMedia -framework CoreVideo"
   elsif !WINDOWS
     # Crystal emits the @[Link] libs (-lGL -lX11 …) BEFORE -legui_cr_sokol,
     # and GNU ld is order-sensitive — the sokol shim's GL/X11 references
