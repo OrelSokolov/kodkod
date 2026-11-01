@@ -13,6 +13,16 @@ VIM modal layer.
 
 ## Build & run
 
+with [carat package manager](https://github.com/OrelSokolov/carat.cr)
+
+
+```
+carat install OrelSokolov/kodkod
+```
+
+or without carat:
+
+
 ```sh
 shards install          # once (egui-cr comes in as a path dependency)
 rake build:dev          # → bin/kodkod (fast iteration)
