@@ -21,3 +21,24 @@ dependencies:
     commit: b77d1386aef561e5604ee7869920684464e21b57
 
 license: MIT
+
+# carat delivery contract: build (mirrors the Rakefile link_flags — carat
+# absolutizes relative -L/archive paths against the shard root after
+# shards install has populated lib/egui-cr) + desktop integration.
+assets:
+  appicon: assets/kodkod.png
+
+binaries:
+  kodkod:
+    main: src/kodkod.cr
+    prebuild: rake build:native build:rec
+    link_flags:
+      # explicit archive: must land ahead of the -l group for plain ld
+      # (same reasoning as the Rakefile link_flags)
+      linux: [-Llib/egui-cr/lib, lib/egui-cr/lib/libegui_cr_sokol.a]
+      darwin: [-Llib/egui-cr/lib, -L/opt/homebrew/lib, -framework Cocoa,
+               -framework OpenGL, -framework QuartzCore]
+      windows: [/LIBPATH:lib/egui-cr/lib]
+    launchers:
+      menu: true       # app menu entry (.desktop / Start Menu / ~/Applications)
+      desktop: true    # desktop shortcut, in addition to menu
