@@ -107,6 +107,45 @@ describe Kodkod::FileTree do
     end
   {% end %}
 
+  it "caps huge listings and reports the cut" do
+    with_temp_dir do |dir|
+      Kodkod::FileTree.refresh
+      extra = 10
+      total = Kodkod::FileTree::MAX_LISTING + extra
+      total.times { |i| File.touch(File.join(dir, "f%05d.txt" % i)) }
+      # The alphabetical head survives; the rest is cut off.
+      entries = Kodkod::FileTree.listing(dir)
+      entries.size.should eq(Kodkod::FileTree::MAX_LISTING)
+      Kodkod::FileTree.full_listing(dir).more.should eq(extra)
+      entries.first.name.should eq("f00000.txt")
+      entries.last.name.should eq(
+        "f%05d.txt" % (Kodkod::FileTree::MAX_LISTING - 1))
+
+      # The cut renders as a dim marker row, not a clickable one.
+      ctx = Egui::Context.new
+      base = Egui::Id.from("kodkod/file_tree/x")
+      ctx.memory.data.set_bool(
+        base.child(Egui::Id.from(dir).value), true)
+      ctx.begin_frame(Egui::RawInput.new(
+        Egui::Rect.from_min_size(Egui::Pos2.zero,
+          Egui::Vec2.new(300.0, 600.0))))
+      ctx.central_panel do |ui|
+        ui.file_tree("x", dir) { |_path| }
+      end
+      ctx.end_frame
+      texts = ctx.painter.commands.select(Egui::TextCmd)
+        .map(&.text.to_s)
+      texts.should contain("… +#{extra} more")
+
+      # A complete listing reports no cut.
+      Kodkod::FileTree.refresh
+      with_temp_dir do |small|
+        File.touch(File.join(small, "a.txt"))
+        Kodkod::FileTree.full_listing(small).more.should eq(0)
+      end
+    end
+  end
+
   it "renders a frame with an expanded root without raising" do
     ctx = Egui::Context.new
     with_temp_dir do |dir|

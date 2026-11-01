@@ -56,8 +56,18 @@ if opts.version?
 end
 theme = opts.theme
 # Default the workspace to the directory kodkod was launched from;
-# `--dir PATH` overrides it.
-dir = opts.dir
+# `--dir PATH` overrides it, `--no-dir` opens folderless. The IMPLICIT
+# default never lands on the user's home directory: a home is usually
+# huge and constantly changing, so the explorer's first listing costs
+# a stat storm and the recursive watch repaints the tree over and
+# over — the editor opens folderless instead (an explicit `--dir`
+# still opens it).
+dir = opts.dir || Dir.current
+if opts.no_dir? ||
+   (opts.dir.nil? && (home = ENV["HOME"]?) &&
+    File.expand_path(dir) == File.expand_path(home))
+  dir = nil
+end
 files = opts.files
 # Monospace face for code: the editor, the ':' command line and inline
 # code all paint through the "monospace" family (Context#mono_fonts).

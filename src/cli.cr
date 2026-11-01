@@ -15,14 +15,21 @@ module Kodkod
 
   struct CLIOptions
     getter theme : String?
-    getter dir : String
+    # The --dir override; nil when the flag was absent (the entrypoint
+    # then falls back to the cwd — and may decline it, see kodkod.cr).
+    getter dir : String?
+    # --no-dir: start folderless whatever the cwd is (the launcher
+    # flag — a menu/desktop shortcut's cwd is usually $HOME, a huge
+    # one being exactly the case the folderless start avoids).
+    getter? no_dir : Bool
     getter files : Array(String)
     getter? help : Bool
     getter? version : Bool
     getter error : String?
     getter help_text : String
 
-    def initialize(@theme : String?, @dir : String, @files : Array(String),
+    def initialize(@theme : String?, @dir : String?, @no_dir : Bool,
+                   @files : Array(String),
                    @help : Bool, @version : Bool, @error : String?,
                    @help_text : String)
     end
@@ -31,7 +38,8 @@ module Kodkod
 
     def self.parse(argv : Array(String)) : self
       theme = nil
-      dir = Dir.current
+      dir = nil
+      no_dir = false
       help = false
       version = false
       error = nil
@@ -47,6 +55,8 @@ module Kodkod
         p.on("--dir PATH", "Open PATH as the workspace folder (default: cwd)") do |v|
           dir = v
         end
+        # --no-dir wins over --dir when both are given.
+        p.on("--no-dir", "Start without a workspace folder") { no_dir = true }
         # Consumed by Egui::CLI before this parser runs; listed so
         # --help documents it.
         p.on("--page ROUTE", "Deep-link router route, e.g. root/settings") { }
@@ -57,7 +67,7 @@ module Kodkod
       parser.parse(argv)
       # parse deletes the options it handled; what survives is the
       # positional file list.
-      new(theme, dir, argv.dup, help, version, error, parser.to_s)
+      new(theme, dir, no_dir, argv.dup, help, version, error, parser.to_s)
     end
   end
 end

@@ -6,7 +6,9 @@ describe Kodkod::CLIOptions do
     o = Kodkod::CLIOptions.parse(["a.cr", "b.json"])
     o.files.should eq(["a.cr", "b.json"])
     o.theme.should be_nil
-    o.dir.should eq(Dir.current)
+    # No --dir: the entrypoint falls back to the cwd itself (and may
+    # decline it — see the home guard in kodkod.cr).
+    o.dir.should be_nil
     o.error.should be_nil
     o.help?.should be_false
     o.version?.should be_false
@@ -26,13 +28,20 @@ describe Kodkod::CLIOptions do
     Kodkod::CLIOptions.parse(["--neon"]).error.should eq("unknown option --neon")
   end
 
+  it "flags --no-dir (folderless start)" do
+    o = Kodkod::CLIOptions.parse(["--no-dir"])
+    o.no_dir?.should be_true
+    o.error.should be_nil
+    Kodkod::CLIOptions.parse([] of String).no_dir?.should be_false
+  end
+
   it "flags --help and --version" do
     Kodkod::CLIOptions.parse(["--help"]).help?.should be_true
     Kodkod::CLIOptions.parse(["-h"]).help?.should be_true
     Kodkod::CLIOptions.parse(["--version"]).version?.should be_true
     # The help text documents every option the binary understands.
     help = Kodkod::CLIOptions.parse([] of String).help_text
-    {"--theme", "--dir", "--page", "--help", "--version"}.each do |flag|
+    {"--theme", "--dir", "--no-dir", "--page", "--help", "--version"}.each do |flag|
       help.should contain(flag)
     end
   end

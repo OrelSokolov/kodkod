@@ -51,16 +51,28 @@ module Kodkod
     class Listing
       property mtime : Time?
       property entries : Array(Entry)
+      # How many children were cut off by MAX_LISTING (0 = complete).
+      property more : Int32
       # When the directory was last re-statted — throttles the
       # recheck (see RECHECK): the walk runs every frame and a stat
       # per expanded directory per frame is the same syscall storm
       # the per-row File.directory? used to cause.
       property checked_at : Time::Instant
 
-      def initialize(@mtime : Time?, @entries : Array(Entry))
+      def initialize(@mtime : Time?, @entries : Array(Entry),
+                     @more : Int32 = 0)
         @checked_at = Time.instant
       end
     end
+
+    # A directory's listing is cut off after this many entries (the
+    # alphabetical head; the sort still puts directories first within
+    # what is listed). The pathological case is a workspace opened on
+    # a huge directory (~ with tens of thousands of entries): without
+    # the cap the first listing stats every child on the UI fiber and
+    # every frame afterwards lays out every row — the editor sits in a
+    # permanent lag loop. A "… +N more" dim row marks the cut.
+    MAX_LISTING = 500
 
     # path => listing; bounded by the number of directories ever
     # expanded this session. Keyed by the REAL expanded path — the
@@ -81,22 +93,33 @@ module Kodkod
     end
 
     def self.listing(dir : String) : Array(Entry)
+      full_listing(dir).entries
+    end
+
+    # The cached Listing behind `listing` (the walk also reads #more
+    # for the cut-off row).
+    def self.full_listing(dir : String) : Listing
       if (cached = @@listings[dir]?)
         if Time.instant - cached.checked_at < RECHECK
-          return cached.entries
+          return cached
         end
         cached.checked_at = Time.instant
         mtime = File.info?(dir).try(&.modification_time)
-        return cached.entries if cached.mtime == mtime
+        return cached if cached.mtime == mtime
       end
       mtime = File.info?(dir).try(&.modification_time)
-      entries = Dir.children(dir).reject { |n| n == ".git" }.map do |n|
+      names = Dir.children(dir).reject { |n| n == ".git" }.sort!
+      more = 0
+      if names.size > MAX_LISTING
+        more = names.size - MAX_LISTING
+        names = names.first(MAX_LISTING)
+      end
+      entries = names.map do |n|
         Entry.new(n, File.directory?(File.join(dir, n)))
       end.sort_by! do |e|
         {e.dir ? 0 : 1, e.name.downcase}
       end
-      @@listings[dir] = Listing.new(mtime, entries)
-      entries
+      @@listings[dir] = Listing.new(mtime, entries, more)
     end
 
     # --- filesystem events -----------------------------------------
@@ -115,6 +138,13 @@ module Kodkod
     @@fs_watch : FSWatch::Watch? = nil
     @@fs_root : String? = nil
     @@repaint : Proc(Nil)? = nil
+    # Coalesces the repaint doorbell: a churning workspace (a browser
+    # cache under ~, a build storm) fires events continuously, and one
+    # request_repaint per event re-rendered the whole tree per event —
+    # the "infinite lag loop". One repaint per window, after the burst
+    # settles a little; listing invalidations still land immediately.
+    @@repaint_armed = false
+    REPAINT_DEBOUNCE = 0.1.seconds
 
     # The fs-event doorbell, re-anchored by `ui` every frame.
     def self.repaint=(cb : Proc(Nil)) : Nil
@@ -146,7 +176,19 @@ module Kodkod
         @@listings.delete(event.path)
         @@listings.delete(File.dirname(event.path))
       end
-      @@repaint.try &.call # wake the loop for a fresh walk
+      schedule_repaint # wake the loop for a fresh walk (debounced)
+    end
+
+    # One repaint per REPAINT_DEBOUNCE window at most: the first event
+    # arms a timer fiber, the rest of the burst rides its repaint.
+    private def self.schedule_repaint : Nil
+      return if @@repaint_armed
+      @@repaint_armed = true
+      spawn(name: "kodkod-tree-repaint") do
+        sleep REPAINT_DEBOUNCE
+        @@repaint_armed = false
+        @@repaint.try &.call
+      end
     end
 
     # Extension → lucide icon name. Everything missing from the map
@@ -427,13 +469,35 @@ module Kodkod
         active == path, path == @last_touched, path == cursor, chevrons)
 
       if dir && open
-        FileTree.listing(path).each do |e|
+        listing = FileTree.full_listing(path)
+        listing.entries.each do |e|
           next if !show_hidden && e.name.starts_with?('.')
           child = File.join(path, e.name)
           walk(ui, memory, base, child, e.dir, depth + 1, active, cursor,
             show_hidden, chevrons)
         end
+        more_row(ui, depth + 1, listing.more) if listing.more > 0
       end
+    end
+
+    # The cut-off marker under a MAX_LISTING'd directory: a plain dim
+    # row (not a click target, not keyboard-navigable) noting how many
+    # siblings were not listed.
+    private def more_row(ui : Egui::Ui, depth : Int32, more : Int32) : Nil
+      style = ui.style
+      indent = depth * INDENT
+      rect = ui.allocate_at_least(
+        Egui::Vec2.new(ui.max_rect.width - indent, line_height(style)))
+      v = style.visuals
+      ui.painter.text(Egui::Pos2.new(rect.left + indent, rect.center.y),
+        "… +#{more} more", style.font_size,
+        v.fade_color(v.text_color, 0.55), family: style.font_family)
+    end
+
+    # One row's height (see `row`).
+    private def line_height(style : Egui::Style) : Float64
+      {style.font_size * Egui::Fonts::LINE_H_FACTOR,
+       style.spacing.interact_size.y}.max + 2.0 * ROW_PAD
     end
 
     # One row: [chevron|blank][icon] name. Click on a directory toggles
@@ -454,8 +518,7 @@ module Kodkod
                     chevrons : Bool) : Nil
       style = ui.style
       v = style.visuals
-      line_h = {style.font_size * Egui::Fonts::LINE_H_FACTOR,
-                style.spacing.interact_size.y}.max + 2.0 * ROW_PAD
+      line_h = line_height(style)
       indent = depth * INDENT
       rect = ui.allocate_at_least(
         Egui::Vec2.new(ui.max_rect.width - indent, line_h))
