@@ -4,5 +4,5 @@
 # Usage: bundle install && bundle exec crosspack <command>
 source "https://rubygems.org"
 
-gem "crosspack", "~> 0.7"
+gem "crosspack", "~> 0.11"
 gem "rake"

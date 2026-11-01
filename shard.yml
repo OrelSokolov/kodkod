@@ -42,3 +42,7 @@ binaries:
     launchers:
       menu: true       # app menu entry (.desktop / Start Menu / ~/Applications)
       desktop: true    # desktop shortcut, in addition to menu
+      # Launch folderless: a launcher's cwd is $HOME, and a huge home as
+      # the implicit workspace is the stat-storm/repaint-loop case the
+      # --no-dir flag avoids (see src/cli.cr).
+      args: [--no-dir]

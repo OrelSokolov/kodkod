@@ -138,6 +138,12 @@ package:
     name: kodkod
     comment: Code editor (rope buffer, VIM mode)
     categories: Development;Utility;
+    # Launcher arguments: folderless start — a menu shortcut's cwd is
+    # $HOME, and a huge home as the implicit workspace is exactly the
+    # stat-storm/repaint-loop case the --no-dir flag avoids. Rides the
+    # .desktop Exec= line, the WiX shortcut Arguments and the macOS
+    # CFBundleArguments alike.
+    args: --no-dir
 
   icon: build/appicon.png
 
