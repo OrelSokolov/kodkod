@@ -253,6 +253,30 @@ describe "Crystal %-literals" do
   end
 end
 
+describe "Crystal block params vs bitwise OR" do
+  it "does not swallow the file after a lone `|` (bitwise OR)" do
+    # The user-facing symptom: `1_u32 | COMPRESS_MARK` opened the
+    # |...| block-params mode; with no second pipe anywhere below,
+    # everything to EOF painted as params.
+    code = "w.open_chunk(1_u32 | COMPRESS_MARK)\n" \
+           "w.w(payload)\n" \
+           "\n" \
+           "private def self.fat_entry(w : ChunkWriter) : Nil\n" \
+           "  nb = name.to_slice\n" \
+           "end\n"
+    toks = Kodkod::Syntax.highlight(code, "crystal").not_nil!
+    tokens_join(toks).should eq(code)
+    token_with(toks, "COMPRESS_MARK").not_nil!.scope.should eq("variable.constant")
+    # the code after the `|` line stays plain code, not one params blob
+    toks.none? { |t| t.scope == "params" && t.text.includes?('\n') }.should be_true
+  end
+
+  it "still paints |x, y| block params" do
+    toks = Kodkod::Syntax.highlight("each_with_index do |e, i|\n  p = e\nend\n", "crystal").not_nil!
+    token_with(toks, "e, i").not_nil!.scope.should eq("params")
+  end
+end
+
 describe "Crystal string interpolation" do
   it "tokenizes code inside #{...} as code, not string" do
     # The user-facing symptom this pins down: everything inside #{...}

@@ -198,9 +198,16 @@ module Kodkod
           scope: "comment.annotation"
         )
 
+        # `|x, y|` block params. A lone `|` is usually bitwise OR
+        # (`1_u32 | COMPRESS_MARK`): without the closing-pipe lookahead
+        # the mode opened there and, with no second `|` in the file,
+        # swallowed everything to EOF in the params color. The lookahead
+        # demands the closing pipe on the SAME line with only param-ish
+        # characters (no parens/newline) in between — real block params
+        # always fit that shape.
         block_params = Highlight::Mode.new.apply(
           scope: "params",
-          begin: /\|(?!=)/,
+          begin: /\|(?!=)(?=[^|\n()]*\|)/,
           end: /\|/,
           exclude_begin: true,
           exclude_end: true,
@@ -225,10 +232,12 @@ module Kodkod
                              ),
                              # \b keeps digits inside identifiers (app2,
                              # ctx2) from matching; hex/oct/bin first so
-                             # 0xff is not split into 0 + xff.
+                             # 0xff is not split into 0 + xff. Trailing
+                             # type suffix (1_u32, 1u8, 1.5_f32, 0xff_u64)
+                             # stays part of the number.
                              Highlight::Mode.new.apply(
                                scope: "number",
-                               match: /\b0[xob][0-9a-fA-F_]+|\b\d[\d_]*((\.[\d_]+)?([eE][+-]?\d+)?)?/
+                               match: /\b0[xob][0-9a-fA-F_]+(?:(?:u|i)(?:8|16|32|64|128)?|f32|f64)?|\b\d[\d_]*((\.[\d_]+)?([eE][+-]?\d+)?)?(?:(?:u|i)(?:8|16|32|64|128)?|f32|f64)?/
                              ),
                              Highlight::Mode.new.apply(
                                scope: "regexp",
